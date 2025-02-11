@@ -69,11 +69,15 @@ if __name__ == '__main__':
         if not os.path.exists(args.model_location):
             os.mkdir(args.model_location)
         for i in range(NUM_MODELS):
-            print(f'\nDownloading model {i} of {NUM_MODELS - 1}')
-            wget.download(
-                f'https://github.com/mlfoundations/model-soups/releases/download/v0.0.2/model_{i}.pt',
-                out=args.model_location
-                )
+            model_path = os.path.join(args.model_location, f'model_{i}.pt')
+            if os.path.exists(model_path):
+                print(f'\nSkipping model {i} - file already exists')
+            else:
+                print(f'\nDownloading model {i} of {NUM_MODELS - 1}')
+                wget.download(
+                    f'https://github.com/mlfoundations/model-soups/releases/download/v0.0.2/model_{i}.pt',
+                    out=args.model_location
+                    )
 
     model_paths = [os.path.join(args.model_location, f'model_{i}.pt') for i in range(NUM_MODELS)]
 
@@ -133,7 +137,7 @@ if __name__ == '__main__':
             accuracy = test_model_on_dataset(model, dataset)
             results[dataset_cls.__name__] = accuracy
             print(accuracy)
-       
+
         with open(UNIFORM_SOUP_RESULTS_FILE, 'a+') as f:
             f.write(json.dumps(results) + '\n')
 
@@ -152,7 +156,7 @@ if __name__ == '__main__':
         individual_model_val_accs = sorted(individual_model_val_accs.items(), key=operator.itemgetter(1))
         individual_model_val_accs.reverse()
         sorted_models = [x[0] for x in individual_model_val_accs]
-        
+
         # Start the soup by using the first ingredient.
         greedy_soup_ingredients = [sorted_models[0]]
         greedy_soup_params = torch.load(os.path.join(args.model_location, f'{sorted_models[0]}.pt'))
@@ -167,7 +171,7 @@ if __name__ == '__main__':
             new_ingredient_params = torch.load(os.path.join(args.model_location, f'{sorted_models[i]}.pt'))
             num_ingredients = len(greedy_soup_ingredients)
             potential_greedy_soup_params = {
-                k : greedy_soup_params[k].clone() * (num_ingredients / (num_ingredients + 1.)) + 
+                k : greedy_soup_params[k].clone() * (num_ingredients / (num_ingredients + 1.)) +
                     new_ingredient_params[k].clone() * (1. / (num_ingredients + 1))
                 for k in new_ingredient_params
             }
@@ -200,25 +204,25 @@ if __name__ == '__main__':
     # Step 5: Plot.
     if args.plot:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
-        individual_model_db['OOD'] = 1./5 * (individual_model_db['ImageNetV2'] + 
-            individual_model_db['ImageNetR'] + individual_model_db['ImageNetSketch'] + 
+        individual_model_db['OOD'] = 1./5 * (individual_model_db['ImageNetV2'] +
+            individual_model_db['ImageNetR'] + individual_model_db['ImageNetSketch'] +
             individual_model_db['ObjectNet'] + individual_model_db['ImageNetA'])
         uniform_soup_db = pd.read_json(UNIFORM_SOUP_RESULTS_FILE, lines=True)
-        uniform_soup_db['OOD'] = 1./5 * (uniform_soup_db['ImageNetV2'] + 
-            uniform_soup_db['ImageNetR'] + uniform_soup_db['ImageNetSketch'] + 
+        uniform_soup_db['OOD'] = 1./5 * (uniform_soup_db['ImageNetV2'] +
+            uniform_soup_db['ImageNetR'] + uniform_soup_db['ImageNetSketch'] +
             uniform_soup_db['ObjectNet'] + uniform_soup_db['ImageNetA'])
         greedy_soup_db = pd.read_json(GREEDY_SOUP_RESULTS_FILE, lines=True)
-        greedy_soup_db['OOD'] = 1./5 * (greedy_soup_db['ImageNetV2'] + 
-            greedy_soup_db['ImageNetR'] + greedy_soup_db['ImageNetSketch'] + 
+        greedy_soup_db['OOD'] = 1./5 * (greedy_soup_db['ImageNetV2'] +
+            greedy_soup_db['ImageNetR'] + greedy_soup_db['ImageNetSketch'] +
             greedy_soup_db['ObjectNet'] + greedy_soup_db['ImageNetA'])
 
         fig = plt.figure(constrained_layout=True, figsize=(8, 6))
         ax = fig.subplots()
 
         ax.scatter(
-            greedy_soup_db['ImageNet'], 
-            greedy_soup_db['OOD'], 
-            marker='*', 
+            greedy_soup_db['ImageNet'],
+            greedy_soup_db['OOD'],
+            marker='*',
             color='C4',
             s=400,
             label='Greedy Soup',
@@ -226,9 +230,9 @@ if __name__ == '__main__':
         )
 
         ax.scatter(
-            uniform_soup_db['ImageNet'], 
-            uniform_soup_db['OOD'], 
-            marker='o', 
+            uniform_soup_db['ImageNet'],
+            uniform_soup_db['OOD'],
+            marker='o',
             color='C0',
             s=200,
             label='Uniform Soup',
@@ -236,9 +240,9 @@ if __name__ == '__main__':
         )
 
         ax.scatter(
-            individual_model_db['ImageNet'].values[0], 
-            individual_model_db['OOD'].values[0], 
-            marker='h', 
+            individual_model_db['ImageNet'].values[0],
+            individual_model_db['OOD'].values[0],
+            marker='h',
             color='slategray',
             s=150,
             label='Initialization (LP)',
@@ -246,9 +250,9 @@ if __name__ == '__main__':
         )
 
         ax.scatter(
-            individual_model_db['ImageNet'].values[1:], 
-            individual_model_db['OOD'].values[1:], 
-            marker='d', 
+            individual_model_db['ImageNet'].values[1:],
+            individual_model_db['OOD'].values[1:],
+            marker='d',
             color='C2',
             s=130,
             label='Various hyperparameters',
