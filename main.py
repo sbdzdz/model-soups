@@ -100,6 +100,7 @@ if __name__ == '__main__':
     INDIVIDUAL_MODEL_RESULTS_FILE = 'individual_model_results.jsonl'
     UNIFORM_SOUP_RESULTS_FILE = 'uniform_soup_results.jsonl'
     GREEDY_SOUP_RESULTS_FILE = 'greedy_soup_results.jsonl'
+    RANDOM_MERGE_RESULTS_FILE = 'random_merge_results.jsonl'
 
     # Step 1: Download models.
     if args.download_models:
