@@ -55,7 +55,44 @@ def parse_arguments():
     )
     return parser.parse_args()
 
+def state_dict_to_vector(state_dict, remove_keys):
+    """Convert a state dictionary to a flattened vector.
 
+    Args:
+        state_dict (dict): The state dictionary to convert.
+        remove_keys (list): Keys to remove from the state dictionary before conversion.
+
+    Returns:
+        torch.Tensor: A flattened vector representation of the state dictionary.
+    """
+    shared_state_dict = {
+        k: v for k, v in state_dict.items() if k not in remove_keys
+    }
+    return torch.nn.utils.parameters_to_vector(
+        [value.reshape(-1) for value in shared_state_dict.values()]
+    )
+
+def vector_to_state_dict(vector, state_dict, remove_keys):
+    """Convert a flattened vector back to a state dictionary.
+
+    Args:
+        vector (torch.Tensor): The flattened vector to convert.
+        state_dict (dict): The original state dictionary to use as a reference.
+        remove_keys (list): Keys that were removed during the flattening process.
+
+    Returns:
+        dict: The reconstructed state dictionary.
+    """
+    reference_dict = {k: v for k, v in state_dict.items() if k not in remove_keys}
+
+    torch.nn.utils.vector_to_parameters(vector, reference_dict.values())
+
+    if "transformer.shared.weight" in reference_dict:
+        shared_weight = reference_dict["transformer.shared.weight"]
+        for key in remove_keys:
+            reference_dict[key] = shared_weight
+
+    return reference_dict
 
 if __name__ == '__main__':
     args = parse_arguments()
@@ -201,7 +238,51 @@ if __name__ == '__main__':
         with open(GREEDY_SOUP_RESULTS_FILE, 'a+') as f:
             f.write(json.dumps(results) + '\n')
 
-    # Step 5: Plot.
+    # Step 5: Random Merge
+    if args.randmerge:
+        if os.path.exists(RANDOM_MERGE_RESULTS_FILE):
+            os.remove(RANDOM_MERGE_RESULTS_FILE)
+
+        # Load first model to get parameter structure and create base vector
+        base_state_dict = torch.load(model_paths[0])
+        remove_keys = []  # Adjust if there are any keys to remove
+        base_vector = state_dict_to_vector(base_state_dict, remove_keys)
+
+        # Create random index assignments
+        total_params = len(base_vector)
+        random_indices = torch.randint(0, NUM_MODELS, (total_params,))
+
+        # Create merged parameters
+        merged_vector = torch.zeros_like(base_vector)
+
+        # For each model, copy its parameters where random_indices matches
+        for model_idx in range(NUM_MODELS):
+            print(f'Processing model {model_idx} of {NUM_MODELS-1} for random merge')
+            state_dict = torch.load(model_paths[model_idx])
+            model_vector = state_dict_to_vector(state_dict, remove_keys)
+
+            # Copy parameters where random_indices matches current model index
+            mask = (random_indices == model_idx)
+            merged_vector[mask] = model_vector[mask]
+
+        # Convert back to state dict
+        merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, remove_keys)
+
+        # Evaluate merged model
+        model = get_model_from_sd(merged_state_dict, base_model)
+        results = {'model_name': 'random_merge'}
+
+        for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
+            print(f'Evaluating random merge on {dataset_cls.__name__}.')
+            dataset = dataset_cls(preprocess, args.data_location, args.batch_size, args.workers)
+            accuracy = test_model_on_dataset(model, dataset)
+            results[dataset_cls.__name__] = accuracy
+            print(accuracy)
+
+        with open(RANDOM_MERGE_RESULTS_FILE, 'a+') as f:
+            f.write(json.dumps(results) + '\n')
+
+    # Step 6: Plot.
     if args.plot:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
         individual_model_db['OOD'] = 1./5 * (individual_model_db['ImageNetV2'] +
