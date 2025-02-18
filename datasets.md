@@ -25,14 +25,39 @@ rm imagenet-r.tar
 
 #### [ImageNet Sketch](https://github.com/HaohanWang/ImageNet-Sketch)
 
-Download links:
-- from [Google Drive](https://drive.google.com/open?id=1Mj0i5HBthqH1p_yeXzsg22gZduvgoNeA)
-- from [Kaggle](https://www.kaggle.com/wanghaohan/imagenetsketch)
+First, install and configure Kaggle:
+```bash
+# Install Kaggle CLI
+pip install kaggle
+
+# Set up credentials
+mkdir -p ~/.kaggle
+
+# Option 1: If you have Kaggle configured on another server:
+# Run this on the server where Kaggle is working:
+kaggle config view  # This will show your credentials
+# Then copy the output to create kaggle.json on the new server
+
+# Option 2: If you need new credentials:
+# 1. Go to https://www.kaggle.com/settings
+# 2. Scroll to "API" section
+# 3. Click "Create New API Token" to download kaggle.json
+# 4. Move the downloaded file:
+mv /path/to/downloaded/kaggle.json ~/.kaggle/
+
+# Set proper permissions (required)
+chmod 600 ~/.kaggle/kaggle.json
+
+# Download and extract the dataset
+kaggle datasets download wanghaohan/imagenetsketch
+unzip imagenetsketch.zip
+rm imagenetsketch.zip
+```
 
 #### [ImageNet V2](https://github.com/modestyachts/ImageNetV2)
 
 ```bash
-wget https://s3-us-west-2.amazonaws.com/imagenetv2public/imagenetv2-matched-frequency.tar.gz
+wget https://huggingface.co/datasets/vaishaal/ImageNetV2/resolve/main/imagenetv2-matched-frequency.tar.gz
 tar -xvf imagenetv2-matched-frequency.tar.gz
 rm imagenetv2-matched-frequency.tar.gz
 ```
