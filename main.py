@@ -263,8 +263,9 @@ if __name__ == '__main__':
         total_params = len(base_vector)
         random_indices = torch.randint(0, NUM_MODELS, (total_params,))
 
-        # Create merged task vector
+        # Create merged vectors for both approaches
         merged_task_vector = torch.zeros_like(base_vector)
+        merged_no_base_vector = torch.zeros_like(base_vector)
 
         # Process one model at a time to save memory
         for model_idx in range(NUM_MODELS):
@@ -273,11 +274,28 @@ if __name__ == '__main__':
             model_vector = state_dict_to_vector(state_dict, remove_keys)
             task_vector = model_vector - base_vector  # Compute task vector
 
-            # Add to merged task vector where random_indices matches
+            # Add to merged vectors where random_indices matches
             mask = (random_indices == model_idx)
             merged_task_vector[mask] = task_vector[mask]
+            merged_no_base_vector[mask] = model_vector[mask]
 
-        # Create and evaluate models for each alpha
+        # Evaluate random merge without base vector
+        print(f'Evaluating random merge without base vector')
+        merged_state_dict = vector_to_state_dict(merged_no_base_vector, base_state_dict, remove_keys)
+        model = get_model_from_sd(merged_state_dict, base_model)
+        results = {'model_name': 'random_merge_no_base'}
+
+        for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
+            print(f'Evaluating random merge (no base) on {dataset_cls.__name__}.')
+            dataset = dataset_cls(preprocess, args.data_location, args.batch_size, args.workers)
+            accuracy = test_model_on_dataset(model, dataset)
+            results[dataset_cls.__name__] = accuracy
+            print(accuracy)
+
+        with open(RANDOM_MERGE_RESULTS_FILE, 'a+') as f:
+            f.write(json.dumps(results) + '\n')
+
+        # Create and evaluate models for each alpha (original approach)
         for alpha in args.alpha:
             print(f'Evaluating random merge with alpha={alpha}')
             merged_vector = base_vector + alpha * merged_task_vector
