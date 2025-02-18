@@ -52,6 +52,7 @@ chmod 600 ~/.kaggle/kaggle.json
 kaggle datasets download wanghaohan/imagenetsketch
 unzip imagenetsketch.zip
 rm imagenetsketch.zip
+mv imagenet-sketch sketch
 ```
 
 #### [ImageNet V2](https://github.com/modestyachts/ImageNetV2)
