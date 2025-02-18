@@ -41,6 +41,9 @@ def parse_arguments():
         "--greedy-soup", action="store_true", default=False,
     )
     parser.add_argument(
+        "--randmerge", action="store_true", default=False,
+    )
+    parser.add_argument(
         "--plot", action="store_true", default=False,
     )
     parser.add_argument(
@@ -52,6 +55,13 @@ def parse_arguments():
         "--workers",
         type=int,
         default=8,
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        nargs='+',
+        default=[1.0],
+        help="List of scaling factors for merged task vectors",
     )
     return parser.parse_args()
 
@@ -120,7 +130,7 @@ if __name__ == '__main__':
     model_paths = [os.path.join(args.model_location, f'model_{i}.pt') for i in range(NUM_MODELS)]
 
     # Step 2: Evaluate individual models.
-    if args.eval_individual_models or args.uniform_soup or args.greedy_soup:
+    if args.eval_individual_models or args.uniform_soup or args.greedy_soup or args.randmerge:
         base_model, preprocess = clip.load('ViT-B/32', 'cpu', jit=False)
 
     if args.eval_individual_models:
@@ -253,50 +263,56 @@ if __name__ == '__main__':
         total_params = len(base_vector)
         random_indices = torch.randint(0, NUM_MODELS, (total_params,))
 
-        # Create merged parameters
-        merged_vector = torch.zeros_like(base_vector)
+        # Create merged task vector
+        merged_task_vector = torch.zeros_like(base_vector)
 
-        # For each model, copy its parameters where random_indices matches
+        # Process one model at a time to save memory
         for model_idx in range(NUM_MODELS):
-            print(f'Processing model {model_idx} of {NUM_MODELS-1} for random merge')
+            print(f'Processing model {model_idx} of {NUM_MODELS-1}')
             state_dict = torch.load(model_paths[model_idx])
             model_vector = state_dict_to_vector(state_dict, remove_keys)
+            task_vector = model_vector - base_vector  # Compute task vector
 
-            # Copy parameters where random_indices matches current model index
+            # Add to merged task vector where random_indices matches
             mask = (random_indices == model_idx)
-            merged_vector[mask] = model_vector[mask]
+            merged_task_vector[mask] = task_vector[mask]
 
-        # Convert back to state dict
-        merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, remove_keys)
+        # Create and evaluate models for each alpha
+        for alpha in args.alpha:
+            print(f'Evaluating random merge with alpha={alpha}')
+            merged_vector = base_vector + alpha * merged_task_vector
+            merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, remove_keys)
 
-        # Evaluate merged model
-        model = get_model_from_sd(merged_state_dict, base_model)
-        results = {'model_name': 'random_merge'}
+            # Evaluate merged model
+            model = get_model_from_sd(merged_state_dict, base_model)
+            results = {'model_name': f'random_merge_alpha_{alpha}'}
 
-        for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
-            print(f'Evaluating random merge on {dataset_cls.__name__}.')
-            dataset = dataset_cls(preprocess, args.data_location, args.batch_size, args.workers)
-            accuracy = test_model_on_dataset(model, dataset)
-            results[dataset_cls.__name__] = accuracy
-            print(accuracy)
+            for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
+                print(f'Evaluating random merge (alpha={alpha}) on {dataset_cls.__name__}.')
+                dataset = dataset_cls(preprocess, args.data_location, args.batch_size, args.workers)
+                accuracy = test_model_on_dataset(model, dataset)
+                results[dataset_cls.__name__] = accuracy
+                print(accuracy)
 
-        with open(RANDOM_MERGE_RESULTS_FILE, 'a+') as f:
-            f.write(json.dumps(results) + '\n')
+            with open(RANDOM_MERGE_RESULTS_FILE, 'a+') as f:
+                f.write(json.dumps(results) + '\n')
 
     # Step 6: Plot.
     if args.plot:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
-        individual_model_db['OOD'] = 1./5 * (individual_model_db['ImageNetV2'] +
-            individual_model_db['ImageNetR'] + individual_model_db['ImageNetSketch'] +
-            individual_model_db['ObjectNet'] + individual_model_db['ImageNetA'])
+        # Filter to only include OOD datasets that exist in the results
+        ood_datasets = ['ImageNetV2', 'ImageNetR', 'ObjectNet', 'ImageNetA']
+        available_ood = [d for d in ood_datasets if d in individual_model_db.columns]
+        individual_model_db['OOD'] = individual_model_db[available_ood].mean(axis=1)
+
         uniform_soup_db = pd.read_json(UNIFORM_SOUP_RESULTS_FILE, lines=True)
-        uniform_soup_db['OOD'] = 1./5 * (uniform_soup_db['ImageNetV2'] +
-            uniform_soup_db['ImageNetR'] + uniform_soup_db['ImageNetSketch'] +
-            uniform_soup_db['ObjectNet'] + uniform_soup_db['ImageNetA'])
+        uniform_soup_db['OOD'] = uniform_soup_db[available_ood].mean(axis=1)
+
         greedy_soup_db = pd.read_json(GREEDY_SOUP_RESULTS_FILE, lines=True)
-        greedy_soup_db['OOD'] = 1./5 * (greedy_soup_db['ImageNetV2'] +
-            greedy_soup_db['ImageNetR'] + greedy_soup_db['ImageNetSketch'] +
-            greedy_soup_db['ObjectNet'] + greedy_soup_db['ImageNetA'])
+        greedy_soup_db['OOD'] = greedy_soup_db[available_ood].mean(axis=1)
+
+        random_merge_db = pd.read_json(RANDOM_MERGE_RESULTS_FILE, lines=True)
+        random_merge_db['OOD'] = random_merge_db[available_ood].mean(axis=1)
 
         fig = plt.figure(constrained_layout=True, figsize=(8, 6))
         ax = fig.subplots()
@@ -340,6 +356,22 @@ if __name__ == '__main__':
             label='Various hyperparameters',
             zorder=10
         )
+
+        # Plot each random merge result
+        for idx, row in random_merge_db.iterrows():
+            alpha = float(row['model_name'].split('_')[-1])  # Extract alpha from model name
+            # Create color that gets darker with higher alpha
+            color = plt.cm.Blues(0.3 + 0.7 * alpha)  # Maps alpha 0->0.3, 1->1.0 on Blues colormap
+            ax.scatter(
+                row['ImageNet'],
+                row['OOD'],
+                marker='P',  # pentagon marker
+                color=color,
+                s=200,
+                label=f'Random Merge (α={alpha})',
+                alpha=0.7,  # slight transparency
+                zorder=10
+            )
 
         ax.set_ylabel('Avg. accuracy on 5 distribution shifts', fontsize=16)
         ax.set_xlabel('ImageNet Accuracy (top-1%)', fontsize=16)
