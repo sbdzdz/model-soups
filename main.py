@@ -13,6 +13,7 @@ import pandas as pd
 
 from datasets import ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA
 from utils import get_model_from_sd, test_model_on_dataset
+from merge import random_merge
 
 def parse_arguments():
     parser = argparse.ArgumentParser()
@@ -64,45 +65,6 @@ def parse_arguments():
         help="List of scaling factors for merged task vectors",
     )
     return parser.parse_args()
-
-def state_dict_to_vector(state_dict, remove_keys):
-    """Convert a state dictionary to a flattened vector.
-
-    Args:
-        state_dict (dict): The state dictionary to convert.
-        remove_keys (list): Keys to remove from the state dictionary before conversion.
-
-    Returns:
-        torch.Tensor: A flattened vector representation of the state dictionary.
-    """
-    shared_state_dict = {
-        k: v for k, v in state_dict.items() if k not in remove_keys
-    }
-    return torch.nn.utils.parameters_to_vector(
-        [value.reshape(-1) for value in shared_state_dict.values()]
-    )
-
-def vector_to_state_dict(vector, state_dict, remove_keys):
-    """Convert a flattened vector back to a state dictionary.
-
-    Args:
-        vector (torch.Tensor): The flattened vector to convert.
-        state_dict (dict): The original state dictionary to use as a reference.
-        remove_keys (list): Keys that were removed during the flattening process.
-
-    Returns:
-        dict: The reconstructed state dictionary.
-    """
-    reference_dict = {k: v for k, v in state_dict.items() if k not in remove_keys}
-
-    torch.nn.utils.vector_to_parameters(vector, reference_dict.values())
-
-    if "transformer.shared.weight" in reference_dict:
-        shared_weight = reference_dict["transformer.shared.weight"]
-        for key in remove_keys:
-            reference_dict[key] = shared_weight
-
-    return reference_dict
 
 if __name__ == '__main__':
     args = parse_arguments()
@@ -254,35 +216,9 @@ if __name__ == '__main__':
         if os.path.exists(RANDOM_MERGE_RESULTS_FILE):
             os.remove(RANDOM_MERGE_RESULTS_FILE)
 
-        # Load first model to get parameter structure and create base vector
-        base_state_dict = torch.load(model_paths[0])
-        remove_keys = []  # Adjust if there are any keys to remove
-        base_vector = state_dict_to_vector(base_state_dict, remove_keys)
-
-        # Create random index assignments
-        total_params = len(base_vector)
-        random_indices = torch.randint(0, NUM_MODELS, (total_params,))
-
-        # Create merged vectors for both approaches
-        merged_task_vector = torch.zeros_like(base_vector)
-        merged_no_base_vector = torch.zeros_like(base_vector)
-
-        # Process one model at a time to save memory
-        for model_idx in range(NUM_MODELS):
-            print(f'Processing model {model_idx} of {NUM_MODELS-1}')
-            state_dict = torch.load(model_paths[model_idx])
-            model_vector = state_dict_to_vector(state_dict, remove_keys)
-            task_vector = model_vector - base_vector  # Compute task vector
-
-            # Add to merged vectors where random_indices matches
-            mask = (random_indices == model_idx)
-            merged_task_vector[mask] = task_vector[mask]
-            merged_no_base_vector[mask] = model_vector[mask]
-
         # Evaluate random merge without base vector
         print(f'Evaluating random merge without base vector')
-        merged_state_dict = vector_to_state_dict(merged_no_base_vector, base_state_dict, remove_keys)
-        model = get_model_from_sd(merged_state_dict, base_model)
+        model = random_merge(model_paths, base_model, use_base=False)
         results = {'model_name': 'random_merge_no_base'}
 
         for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
@@ -295,14 +231,10 @@ if __name__ == '__main__':
         with open(RANDOM_MERGE_RESULTS_FILE, 'a+') as f:
             f.write(json.dumps(results) + '\n')
 
-        # Create and evaluate models for each alpha (original approach)
+        # Create and evaluate models for each alpha
         for alpha in args.alpha:
             print(f'Evaluating random merge with alpha={alpha}')
-            merged_vector = base_vector + alpha * merged_task_vector
-            merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, remove_keys)
-
-            # Evaluate merged model
-            model = get_model_from_sd(merged_state_dict, base_model)
+            model = random_merge(model_paths, base_model, use_base=True, alpha=alpha)
             results = {'model_name': f'random_merge_alpha_{alpha}'}
 
             for dataset_cls in [ImageNet2p, ImageNet, ImageNetV2, ImageNetSketch, ImageNetR, ObjectNet, ImageNetA]:
@@ -318,7 +250,6 @@ if __name__ == '__main__':
     # Step 6: Plot.
     if args.plot:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
-        # Filter to only include OOD datasets that exist in the results
         ood_datasets = ['ImageNetV2', 'ImageNetR', 'ObjectNet', 'ImageNetA']
         available_ood = [d for d in ood_datasets if d in individual_model_db.columns]
         individual_model_db['OOD'] = individual_model_db[available_ood].mean(axis=1)
@@ -332,8 +263,9 @@ if __name__ == '__main__':
         random_merge_db = pd.read_json(RANDOM_MERGE_RESULTS_FILE, lines=True)
         random_merge_db['OOD'] = random_merge_db[available_ood].mean(axis=1)
 
-        fig = plt.figure(constrained_layout=True, figsize=(8, 6))
-        ax = fig.subplots()
+        # Create figure with larger size
+        plt.figure(figsize=(12, 12))  # Increased from default size
+        ax = plt.gca()
 
         ax.scatter(
             greedy_soup_db['ImageNet'],
@@ -377,22 +309,35 @@ if __name__ == '__main__':
 
         # Plot each random merge result
         for idx, row in random_merge_db.iterrows():
-            alpha = float(row['model_name'].split('_')[-1])  # Extract alpha from model name
-            # Create color that gets darker with higher alpha
-            color = plt.cm.Blues(0.3 + 0.7 * alpha)  # Maps alpha 0->0.3, 1->1.0 on Blues colormap
-            ax.scatter(
-                row['ImageNet'],
-                row['OOD'],
-                marker='P',  # pentagon marker
-                color=color,
-                s=200,
-                label=f'Random Merge (α={alpha})',
-                alpha=0.7,  # slight transparency
-                zorder=10
-            )
+            model_name = row['model_name']
+            if model_name == 'random_merge_no_base':
+                pass
+                #ax.scatter(
+                #    row['ImageNet'],
+                #    row['OOD'],
+                #    marker='P',  # pentagon marker
+                #    #color='lightseagreen',
+                #    color='red',
+                #    s=300,
+                #    label='Random Merge (no base)',
+                #    zorder=10
+                #)
+            else:
+                alpha = float(model_name.split('_')[-1])  # Extract alpha from model name
+                normalized_alpha = 0.3 + 0.7 * (alpha - 0.1) / (1.2 - 0.1)
+                color = plt.cm.Blues(normalized_alpha)  # Maps normalized alpha to Blues colormap
+                ax.scatter(
+                    row['ImageNet'],
+                    row['OOD'],
+                    marker='P',  # pentagon marker
+                    color=color,
+                    s=200,
+                    label=f'Random Merge (α={alpha})',
+                    zorder=10
+                )
 
         ax.set_ylabel('Avg. accuracy on 5 distribution shifts', fontsize=16)
         ax.set_xlabel('ImageNet Accuracy (top-1%)', fontsize=16)
         ax.grid()
-        ax.legend(fontsize=13)
+        ax.legend(fontsize=13, ncol=2, facecolor='white').set_zorder(100)
         plt.savefig('figure.png', bbox_inches='tight')
