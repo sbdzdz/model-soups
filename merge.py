@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import numpy as np
 
+
 def random_merge(
     model_paths: List[str],
     base_model: torch.nn.Module,
@@ -30,14 +31,14 @@ def random_merge(
     cache_path = get_cache_path(value, elect_sign, use_base, alpha)
     if os.path.exists(cache_path):
         print(f"Loading cached merged model from {cache_path}")
-        state_dict = torch.load(cache_path, map_location='cpu')
+        state_dict = torch.load(cache_path, map_location="cpu")
         return get_model_from_sd(state_dict, base_model)
 
     if remove_keys is None:
         remove_keys = []
 
     print("Loading all models into memory...")
-    state_dicts = [torch.load(path, map_location='cpu') for path in model_paths]
+    state_dicts = [torch.load(path, map_location="cpu") for path in model_paths]
     base_state_dict = state_dicts[0]
 
     print("Converting models to vectors...")
@@ -54,16 +55,20 @@ def random_merge(
     model_vectors = torch.stack(model_vectors)
 
     if value == "random":
-        random_indices = torch.randint(0, num_models, (total_params,), device='cpu')
+        random_indices = torch.randint(0, num_models, (total_params,), device="cpu")
         merged_vector = model_vectors[random_indices, torch.arange(total_params)]
     elif value == "mean":
         merged_vector = model_vectors.mean(dim=0)
     elif value == "max":
-        merged_vector = model_vectors.abs().max(dim=0)[0] * torch.sign(model_vectors.sum(dim=0))
+        merged_vector = model_vectors.abs().max(dim=0)[0] * torch.sign(
+            model_vectors.sum(dim=0)
+        )
     elif value == "median":
         merged_vector = torch.median(model_vectors, dim=0)[0]
     else:
-        raise ValueError(f"Unknown value method: {value}. Choose from: random, mean, max, median")
+        raise ValueError(
+            f"Unknown value method: {value}. Choose from: random, mean, max, median"
+        )
 
     if elect_sign:
         param_sums = model_vectors.sum(dim=0)
@@ -73,7 +78,9 @@ def random_merge(
     if use_base:
         merged_vector = base_vector + alpha * merged_vector
 
-    merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, remove_keys)
+    merged_state_dict = vector_to_state_dict(
+        merged_vector, base_state_dict, remove_keys
+    )
 
     print(f"Saving merged model to {cache_path}")
     torch.save(merged_state_dict, cache_path)
@@ -84,7 +91,9 @@ def random_merge(
             alt_cache_path = Path(get_cache_path(value, elect_sign, use_base, alpha))
             if not alt_cache_path.exists():
                 alt_merged_vector = base_vector + alpha * (merged_vector - base_vector)
-                alt_merged_state_dict = vector_to_state_dict(alt_merged_vector, base_state_dict, remove_keys)
+                alt_merged_state_dict = vector_to_state_dict(
+                    alt_merged_vector, base_state_dict, remove_keys
+                )
                 print(f"Saving additional alpha variant ({alpha}) to {alt_cache_path}")
                 torch.save(alt_merged_state_dict, alt_cache_path)
 
@@ -101,9 +110,7 @@ def state_dict_to_vector(state_dict, remove_keys):
     Returns:
         torch.Tensor: A flattened vector representation of the state dictionary.
     """
-    shared_state_dict = {
-        k: v for k, v in state_dict.items() if k not in remove_keys
-    }
+    shared_state_dict = {k: v for k, v in state_dict.items() if k not in remove_keys}
     return torch.nn.utils.parameters_to_vector(
         [value.reshape(-1) for value in shared_state_dict.values()]
     )
@@ -132,7 +139,9 @@ def vector_to_state_dict(vector, state_dict, remove_keys):
     return reference_dict
 
 
-def get_cache_path(value: str, elect_sign: bool, use_base: bool, alpha: Optional[float] = None) -> str:
+def get_cache_path(
+    value: str, elect_sign: bool, use_base: bool, alpha: Optional[float] = None
+) -> str:
     """Generate a standardized cache path for merged models.
 
     Args:
@@ -144,17 +153,17 @@ def get_cache_path(value: str, elect_sign: bool, use_base: bool, alpha: Optional
     Returns:
         str: Path where the merged model should be cached
     """
-    work_dir = os.environ.get('WORK', '.')
-    model_dir = Path(work_dir) / 'models'
+    work_dir = os.environ.get("WORK", ".")
+    model_dir = Path(work_dir) / "models"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     parts = [value]
     if elect_sign:
-        parts.append('elect_sign')
+        parts.append("elect_sign")
     if use_base:
-        parts.append('use_base')
+        parts.append("use_base")
         if alpha is not None:
-            parts.append(f'alpha_{alpha}')
+            parts.append(f"alpha_{alpha}")
 
-    filename = '_'.join(parts) + '.pt'
+    filename = "_".join(parts) + ".pt"
     return str(model_dir / filename)
