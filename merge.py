@@ -9,7 +9,7 @@ import numpy as np
 def random_merge(
     model_paths: List[str],
     base_model: torch.nn.Module,
-    use_base: bool = True,
+    use_base: bool = False,
     elect_sign: bool = False,
     alpha: Optional[float] = 1.0,
     remove_keys: Optional[List[str]] = None,
@@ -163,7 +163,7 @@ def get_cache_path(
     if use_base:
         parts.append("use_base")
         if alpha is not None:
-            parts.append(f"alpha_{alpha}")
+            parts.append(f"alpha_{alpha:.1f}")
 
     filename = "_".join(parts) + ".pt"
     return str(model_dir / filename)
