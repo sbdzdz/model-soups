@@ -21,7 +21,7 @@ from datasets import (
     ImageNetA,
 )
 from utils import get_model_from_sd, test_model_on_dataset
-from merge import random_merge
+from merge import random_merge, get_cache_path
 
 
 def parse_arguments():
@@ -85,6 +85,12 @@ def parse_arguments():
         nargs="+",
         default=[1.0],
         help="List of scaling factors for merged task vectors",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        default=False,
+        help="Whether to overwrite existing results",
     )
     return parser.parse_args()
 
@@ -290,66 +296,92 @@ if __name__ == "__main__":
 
     # Step 5: Random Merge
     if args.randmerge:
-        if os.path.exists(RANDOM_MERGE_RESULTS_FILE):
+        if args.overwrite and os.path.exists(RANDOM_MERGE_RESULTS_FILE):
             os.remove(RANDOM_MERGE_RESULTS_FILE)
 
-        # Evaluate random merge without base vector
-        print(f"Evaluating random merge without base vector")
-        model = random_merge(model_paths, base_model, use_base=False)
-        results = {"model_name": "random_merge_no_base"}
+        existing_configs = set()
+        if os.path.exists(RANDOM_MERGE_RESULTS_FILE):
+            with open(RANDOM_MERGE_RESULTS_FILE, "r") as f:
+                for line in f:
+                    result = json.loads(line)
+                    existing_configs.add(result["model_name"])
 
-        for dataset_cls in [
-            ImageNet2p,
-            ImageNet,
-            ImageNetV2,
-            ImageNetSketch,
-            ImageNetR,
-            ObjectNet,
-            ImageNetA,
-        ]:
-            print(f"Evaluating random merge (no base) on {dataset_cls.__name__}.")
-            dataset = dataset_cls(
-                preprocess, args.data_location, args.batch_size, args.workers
-            )
-            accuracy = test_model_on_dataset(model, dataset)
-            results[dataset_cls.__name__] = accuracy
-            print(accuracy)
+        use_base_options = [True, False]
+        elect_sign_options = [True, False]
+        value_options = ["random", "mean", "median"]
 
-        with open(RANDOM_MERGE_RESULTS_FILE, "a+") as f:
-            f.write(json.dumps(results) + "\n")
+        for use_base in use_base_options:
+            for elect_sign in elect_sign_options:
+                for value in value_options:
+                    alphas = args.alpha if use_base else [None]
 
-        # Create and evaluate models for each alpha
-        for alpha in args.alpha:
-            print(f"Evaluating random merge with alpha={alpha}")
-            model = random_merge(model_paths, base_model, use_base=True, alpha=alpha)
-            results = {"model_name": f"random_merge_alpha_{alpha}"}
+                    for alpha in alphas:
+                        config_name = (
+                            get_cache_path(value, elect_sign, use_base, alpha)
+                            .split("/")[-1]
+                            .replace(".pt", "")
+                        )
 
-            for dataset_cls in [
-                ImageNet2p,
-                ImageNet,
-                ImageNetV2,
-                ImageNetSketch,
-                ImageNetR,
-                ObjectNet,
-                ImageNetA,
-            ]:
-                print(
-                    f"Evaluating random merge (alpha={alpha}) on {dataset_cls.__name__}."
-                )
-                dataset = dataset_cls(
-                    preprocess, args.data_location, args.batch_size, args.workers
-                )
-                accuracy = test_model_on_dataset(model, dataset)
-                results[dataset_cls.__name__] = accuracy
-                print(accuracy)
+                        if config_name in existing_configs and not args.overwrite:
+                            print(f"\nSkipping {config_name} - already exists")
+                            continue
 
-            with open(RANDOM_MERGE_RESULTS_FILE, "a+") as f:
-                f.write(json.dumps(results) + "\n")
+                        model = random_merge(
+                            model_paths,
+                            base_model,
+                            use_base=use_base,
+                            elect_sign=elect_sign,
+                            value=value,
+                            alpha=alpha,
+                        )
+
+                        results = {"model_name": config_name}
+                        results.update(
+                            {
+                                "params": {
+                                    "value": value,
+                                    "elect_sign": elect_sign,
+                                    "use_base": use_base,
+                                    "alpha": alpha,
+                                }
+                            }
+                        )
+
+                        for dataset_cls in [
+                            ImageNet2p,
+                            ImageNet,
+                            ImageNetV2,
+                            ImageNetSketch,
+                            ImageNetR,
+                            ObjectNet,
+                            ImageNetA,
+                        ]:
+                            print(
+                                f"Evaluating {config_name} on {dataset_cls.__name__}."
+                            )
+                            dataset = dataset_cls(
+                                preprocess,
+                                args.data_location,
+                                args.batch_size,
+                                args.workers,
+                            )
+                            accuracy = test_model_on_dataset(model, dataset)
+                            results[dataset_cls.__name__] = accuracy
+                            print(accuracy)
+
+                        with open(RANDOM_MERGE_RESULTS_FILE, "a+") as f:
+                            f.write(json.dumps(results) + "\n")
 
     # Step 6: Plot.
     if args.plot:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
-        ood_datasets = ["ImageNetV2", "ImageNetR", "ObjectNet", "ImageNetA"]
+        ood_datasets = [
+            "ImageNetV2",
+            "ImageNetR",
+            "ImageNetSketch",
+            "ObjectNet",
+            "ImageNetA",
+        ]
         available_ood = [d for d in ood_datasets if d in individual_model_db.columns]
         individual_model_db["OOD"] = individual_model_db[available_ood].mean(axis=1)
 
@@ -406,37 +438,70 @@ if __name__ == "__main__":
             zorder=10,
         )
 
-        # Plot each random merge result
-        for idx, row in random_merge_db.iterrows():
-            model_name = row["model_name"]
-            if model_name == "random_merge_no_base":
-                pass
-                # ax.scatter(
-                #    row['ImageNet'],
-                #    row['OOD'],
-                #    marker='P',  # pentagon marker
-                #    #color='lightseagreen',
-                #    color='red',
-                #    s=300,
-                #    label='Random Merge (no base)',
-                #    zorder=10
-                # )
+        value_colors = {
+            "random": "C5",  # purple
+            "mean": "C6",  # brown
+            "median": "C7",  # pink
+        }
+        markers = {False: "o", True: "^"}
+
+        plotted_labels = set()
+        sorted_data = sorted(
+            random_merge_db.iterrows(), key=lambda x: x[1]["params"]["value"]
+        )
+
+        for row in sorted_data:
+            data = row[1]
+            params = data["params"]
+            value = params["value"]
+            elect_sign = params["elect_sign"]
+            use_base = params["use_base"]
+            alpha = params["alpha"]
+
+            # Construct label
+            label_parts = [value.capitalize()]
+            if elect_sign:
+                label_parts.append("elect sign")
+            if use_base and alpha is not None:
+                label_parts.append(f"alpha={alpha:.1f}")
+
+            label = " ".join(
+                [
+                    label_parts[0],
+                    f"({', '.join(label_parts[1:])})" if len(label_parts) > 1 else "",
+                ]
+            ).strip()
+
+            # Only show label if it hasn't been shown before
+            if label in plotted_labels:
+                label = None
             else:
-                alpha = float(
-                    model_name.split("_")[-1]
-                )  # Extract alpha from model name
-                normalized_alpha = 0.3 + 0.7 * (alpha - 0.1) / (1.2 - 0.1)
-                color = plt.cm.Blues(
-                    normalized_alpha
-                )  # Maps normalized alpha to Blues colormap
+                plotted_labels.add(label)
+
+            if use_base:
+                color_alpha = 0.4 + (0.5 * alpha) if alpha is not None else 0.65
                 ax.scatter(
-                    row["ImageNet"],
-                    row["OOD"],
-                    marker="P",  # pentagon marker
-                    color=color,
+                    data["ImageNet"],
+                    data["OOD"],
+                    marker=markers[elect_sign],
+                    color=value_colors[value],
                     s=200,
-                    label=f"Random Merge (α={alpha})",
-                    zorder=10,
+                    label=label,
+                    alpha=color_alpha,
+                    zorder=5,
+                    linewidth=0,
+                )
+            else:
+                ax.scatter(
+                    data["ImageNet"],
+                    data["OOD"],
+                    marker=markers[elect_sign],
+                    edgecolors=value_colors[value],
+                    facecolors="none",
+                    s=200,
+                    label=label,
+                    linewidth=2,
+                    zorder=5,
                 )
 
         ax.set_ylabel("Avg. accuracy on 5 distribution shifts", fontsize=16)
