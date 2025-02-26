@@ -100,7 +100,7 @@ def random_merge(
     return get_model_from_sd(merged_state_dict, base_model)
 
 
-def state_dict_to_vector(state_dict, remove_keys):
+def state_dict_to_vector(state_dict, remove_keys=None):
     """Convert a state dictionary to a flattened vector.
 
     Args:
@@ -110,13 +110,15 @@ def state_dict_to_vector(state_dict, remove_keys):
     Returns:
         torch.Tensor: A flattened vector representation of the state dictionary.
     """
+    if remove_keys is None:
+        remove_keys = []
     shared_state_dict = {k: v for k, v in state_dict.items() if k not in remove_keys}
     return torch.nn.utils.parameters_to_vector(
         [value.reshape(-1) for value in shared_state_dict.values()]
     )
 
 
-def vector_to_state_dict(vector, state_dict, remove_keys):
+def vector_to_state_dict(vector, state_dict, remove_keys=None):
     """Convert a flattened vector back to a state dictionary.
 
     Args:
@@ -127,6 +129,10 @@ def vector_to_state_dict(vector, state_dict, remove_keys):
     Returns:
         dict: The reconstructed state dictionary.
     """
+
+    if remove_keys is None:
+        remove_keys = []
+
     reference_dict = {k: v for k, v in state_dict.items() if k not in remove_keys}
 
     torch.nn.utils.vector_to_parameters(vector, reference_dict.values())
