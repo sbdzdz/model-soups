@@ -6,6 +6,8 @@ from pathlib import Path
 from tabulate import tabulate
 from tqdm import tqdm
 import numpy as np
+from typing import List, Optional
+import torch
 
 from datasets import (
     ImageNet2p,
@@ -55,13 +57,13 @@ def parse_arguments():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=1024,
         help="Batch size for evaluation",
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=16,
+        default=8,
         help="Number of worker threads for data loading",
     )
     parser.add_argument(
@@ -121,27 +123,28 @@ def main():
             results = json.load(f)
 
     configs = []
-    for use_base in [False, True]:
-        for elect_sign in [False, True]:
-            if use_base:
-                for alpha in np.arange(0.1, 1.3, 0.1):
+    for merge_strategy in ["random", "mean", "median"]:
+        for use_base in [False, True]:
+            for elect_sign in [False, True]:
+                if use_base:
+                    for alpha in np.arange(0.1, 1.3, 0.1):
+                        configs.append(
+                            {
+                                "use_base": use_base,
+                                "elect_sign": elect_sign,
+                                "alpha": alpha,
+                                "value": merge_strategy,
+                            }
+                        )
+                else:
                     configs.append(
                         {
                             "use_base": use_base,
                             "elect_sign": elect_sign,
-                            "alpha": alpha,
-                            "value": "random",
+                            "alpha": None,
+                            "value": merge_strategy,
                         }
                     )
-            else:
-                configs.append(
-                    {
-                        "use_base": use_base,
-                        "elect_sign": elect_sign,
-                        "alpha": None,
-                        "value": "random",
-                    }
-                )
 
     for config in tqdm(configs, desc="Testing configurations"):
         config_name = config["value"]
