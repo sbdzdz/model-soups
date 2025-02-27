@@ -394,8 +394,7 @@ if __name__ == "__main__":
         random_merge_db = pd.read_json(RANDOM_MERGE_RESULTS_FILE, lines=True)
         random_merge_db["OOD"] = random_merge_db[available_ood].mean(axis=1)
 
-        # Create figure with larger size
-        plt.figure(figsize=(12, 12))  # Increased from default size
+        plt.figure(figsize=(12, 12))
         ax = plt.gca()
 
         ax.scatter(
