@@ -60,9 +60,8 @@ def random_merge(
     elif value == "mean":
         merged_vector = model_vectors.mean(dim=0)
     elif value == "max":
-        merged_vector = model_vectors.abs().max(dim=0)[0] * torch.sign(
-            model_vectors.sum(dim=0)
-        )
+        max_abs_indices = model_vectors.abs().max(dim=0)[1]
+        merged_vector = torch.gather(model_vectors, 0, max_abs_indices.unsqueeze(0)).squeeze(0)
     elif value == "median":
         merged_vector = torch.median(model_vectors, dim=0)[0]
     else:
@@ -84,18 +83,6 @@ def random_merge(
 
     print(f"Saving merged model to {cache_path}")
     torch.save(merged_state_dict, cache_path)
-
-    if use_base:
-        alphas = np.arange(0.1, 1.3, 0.1)
-        for alpha in alphas:
-            alt_cache_path = Path(get_cache_path(value, elect_sign, use_base, alpha))
-            if not alt_cache_path.exists():
-                alt_merged_vector = base_vector + alpha * (merged_vector - base_vector)
-                alt_merged_state_dict = vector_to_state_dict(
-                    alt_merged_vector, base_state_dict, remove_keys
-                )
-                print(f"Saving additional alpha variant ({alpha}) to {alt_cache_path}")
-                torch.save(alt_merged_state_dict, alt_cache_path)
 
     return get_model_from_sd(merged_state_dict, base_model)
 
