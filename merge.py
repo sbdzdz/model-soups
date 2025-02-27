@@ -4,6 +4,7 @@ from utils import get_model_from_sd
 import os
 from pathlib import Path
 import numpy as np
+import re
 
 
 def random_merge(
@@ -12,7 +13,7 @@ def random_merge(
     use_base: bool = False,
     elect_sign: bool = False,
     alpha: Optional[float] = 1.0,
-    prefix: Optional[str] = None,
+    pattern: Optional[str] = None,
     value: str = "random",
 ) -> torch.nn.Module:
     """Randomly merge multiple models by assigning each parameter to a random source model.
@@ -23,7 +24,7 @@ def random_merge(
         use_base: Whether to use base model + task vectors (True) or direct parameter merge (False)
         elect_sign: Whether to use sign election for merging (not implemented yet)
         alpha: Scaling factor for task vectors when use_base=True (default: 1.0)
-        prefix: If provided, only merge parameters whose keys start with this prefix
+        pattern: If provided, only merge parameters whose keys match this regex pattern
         value: Method to compute parameter values from multiple models
 
     Returns:
@@ -40,7 +41,7 @@ def random_merge(
     base_state_dict = state_dicts[0]
 
     print("Converting models to vectors...")
-    model_vectors = [state_dict_to_vector(sd, prefix) for sd in state_dicts]
+    model_vectors = [state_dict_to_vector(sd, pattern) for sd in state_dicts]
     base_vector = model_vectors[0]
 
     if use_base:
@@ -77,7 +78,7 @@ def random_merge(
     if use_base:
         merged_vector = base_vector + alpha * merged_vector
 
-    merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, prefix)
+    merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, pattern)
 
     print(f"Saving merged model to {cache_path}")
     torch.save(merged_state_dict, cache_path)
@@ -85,41 +86,45 @@ def random_merge(
     return get_model_from_sd(merged_state_dict, base_model)
 
 
-def state_dict_to_vector(state_dict, prefix=None):
+def state_dict_to_vector(state_dict, pattern=None):
     """Convert a state dictionary to a flattened vector.
 
     Args:
         state_dict (dict): The state dictionary to convert.
-        remove_keys (list): Keys to remove from the state dictionary before conversion.
+        pattern (str): Regex pattern to filter keys in the state dictionary.
 
     Returns:
         torch.Tensor: A flattened vector representation of the state dictionary.
     """
-    shared_state_dict = {
-        k: v for k, v in state_dict.items() if prefix is None or k.startswith(prefix)
-    }
+    if pattern is not None:
+        regex = re.compile(pattern)
+        shared_state_dict = {k: v for k, v in state_dict.items() if regex.search(k)}
+    else:
+        shared_state_dict = state_dict
+
     return torch.nn.utils.parameters_to_vector(
         [value.reshape(-1) for value in shared_state_dict.values()]
     )
 
 
-def vector_to_state_dict(vector, state_dict, prefix=None):
+def vector_to_state_dict(vector, state_dict, pattern=None):
     """Convert a flattened vector back to a state dictionary.
 
     Args:
         vector (torch.Tensor): The flattened vector to convert.
         state_dict (dict): The original state dictionary to use as a reference.
-        remove_keys (list): Keys that were removed during the flattening process.
+        pattern (str): Regex pattern used to filter keys during flattening.
 
     Returns:
         dict: The reconstructed state dictionary.
     """
-
     result_dict = {k: v.clone() for k, v in state_dict.items()}
 
-    filtered_values = [
-        v for k, v in result_dict.items() if prefix is None or k.startswith(prefix)
-    ]
+    if pattern is not None:
+        regex = re.compile(pattern)
+        filtered_values = [v for k, v in result_dict.items() if regex.search(k)]
+    else:
+        filtered_values = result_dict.values()
 
     torch.nn.utils.vector_to_parameters(vector, filtered_values)
 
