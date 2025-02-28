@@ -13,8 +13,9 @@ def random_merge(
     use_base: bool = False,
     elect_sign: bool = False,
     alpha: Optional[float] = 1.0,
-    pattern: Optional[str] = None,
+    variant: str = "all",
     value: str = "random",
+    cache: bool = True,
 ) -> torch.nn.Module:
     """Randomly merge multiple models by assigning each parameter to a random source model.
 
@@ -24,14 +25,18 @@ def random_merge(
         use_base: Whether to use base model + task vectors (True) or direct parameter merge (False)
         elect_sign: Whether to use sign election for merging (not implemented yet)
         alpha: Scaling factor for task vectors when use_base=True (default: 1.0)
-        pattern: If provided, only merge parameters whose keys match this regex pattern
+        variant: Which variant of the model to merge (default: "all")
         value: Method to compute parameter values from multiple models
+        cache: Whether to save/load the merged model to/from disk (default: True)
 
     Returns:
         Merged model instance
     """
-    cache_path = get_cache_path(value, elect_sign, use_base, alpha)
-    if os.path.exists(cache_path):
+    # Get the pattern based on the variant
+    pattern = get_pattern_for_variant(variant)
+
+    cache_path = get_cache_path(value, elect_sign, use_base, alpha, variant)
+    if cache and os.path.exists(cache_path):
         print(f"Loading cached merged model from {cache_path}")
         state_dict = torch.load(cache_path, map_location="cpu")
         return get_model_from_sd(state_dict, base_model)
@@ -80,10 +85,32 @@ def random_merge(
 
     merged_state_dict = vector_to_state_dict(merged_vector, base_state_dict, pattern)
 
-    print(f"Saving merged model to {cache_path}")
-    torch.save(merged_state_dict, cache_path)
+    if cache:
+        print(f"Saving merged model to {cache_path}")
+        torch.save(merged_state_dict, cache_path)
 
     return get_model_from_sd(merged_state_dict, base_model)
+
+
+def get_pattern_for_variant(variant: str) -> Optional[str]:
+    """Get the regex pattern for a given variant.
+
+    Args:
+        variant: The variant name
+
+    Returns:
+        Optional[str]: The regex pattern or None for "all" variant
+    """
+    variants = {
+        "all": None,  # No pattern means all parameters
+        "transformer_only": r"model\.visual\.transformer",
+        "attention_only": r"model\.visual\.transformer\.resblocks\.\d+\.attn",
+        "mlp_only": r"model\.visual\.transformer\.resblocks\.\d+\.mlp",
+        "early_layers": r"model\.visual\.transformer\.resblocks\.[0-5]\.",
+        "late_layers": r"model\.visual\.transformer\.resblocks\.([6-9]|1[0-1])\.",
+    }
+
+    return variants.get(variant)
 
 
 def state_dict_to_vector(state_dict, pattern=None):
@@ -132,7 +159,11 @@ def vector_to_state_dict(vector, state_dict, pattern=None):
 
 
 def get_cache_path(
-    value: str, elect_sign: bool, use_base: bool, alpha: Optional[float] = None
+    value: str,
+    elect_sign: bool,
+    use_base: bool,
+    alpha: Optional[float] = None,
+    variant: str = "all",
 ) -> str:
     """Generate a standardized cache path for merged models.
 
@@ -141,6 +172,7 @@ def get_cache_path(
         elect_sign: Whether sign election was used
         use_base: Whether base model + task vectors were used
         alpha: Scaling factor for task vectors (only used if use_base=True)
+        variant: The variant of the model being merged
 
     Returns:
         str: Path where the merged model should be cached
@@ -156,6 +188,10 @@ def get_cache_path(
         parts.append("use_base")
         if alpha is not None:
             parts.append(f"alpha_{alpha:.1f}")
+
+    # Only append variant to filename if it's not "all"
+    if variant != "all":
+        parts.append(variant)
 
     filename = "_".join(parts) + ".pt"
     return str(model_dir / filename)
