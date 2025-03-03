@@ -19,7 +19,7 @@ from datasets import (
     ImageNetA,
 )
 from utils import test_model_on_dataset
-from merge import random_merge
+from merge import merge
 
 
 def parse_arguments():
@@ -176,7 +176,7 @@ def main():
             continue
 
         print(f"\nMerging models with configuration: {config_name}")
-        model = random_merge(
+        model = merge(
             model_paths,
             base_model,
             use_base=config["use_base"],

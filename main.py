@@ -21,7 +21,7 @@ from datasets import (
     ImageNetA,
 )
 from utils import get_model_from_sd, test_model_on_dataset
-from merge import random_merge, get_cache_path
+from merge import merge, get_cache_path
 
 
 def parse_arguments():
@@ -65,8 +65,9 @@ def parse_arguments():
     )
     parser.add_argument(
         "--plot",
-        action="store_true",
-        default=False,
+        type=str,
+        default="all",
+        choices=["all", "best"],
     )
     parser.add_argument(
         "--batch-size",
@@ -308,7 +309,7 @@ if __name__ == "__main__":
 
         use_base_options = [True, False]
         elect_sign_options = [True, False]
-        value_options = ["random", "mean", "median"]
+        value_options = ["random", "mean", "median", "max"]
 
         for use_base in use_base_options:
             for elect_sign in elect_sign_options:
@@ -326,7 +327,7 @@ if __name__ == "__main__":
                             print(f"\nSkipping {config_name} - already exists")
                             continue
 
-                        model = random_merge(
+                        model = merge(
                             model_paths,
                             base_model,
                             use_base=use_base,
@@ -373,7 +374,7 @@ if __name__ == "__main__":
                             f.write(json.dumps(results) + "\n")
 
     # Step 6: Plot.
-    if args.plot:
+    if args.plot in ["all", "best"]:
         individual_model_db = pd.read_json(INDIVIDUAL_MODEL_RESULTS_FILE, lines=True)
         ood_datasets = [
             "ImageNetV2",
@@ -393,6 +394,10 @@ if __name__ == "__main__":
 
         random_merge_db = pd.read_json(RANDOM_MERGE_RESULTS_FILE, lines=True)
         random_merge_db["OOD"] = random_merge_db[available_ood].mean(axis=1)
+
+        random_merge_db["geo_mean"] = np.sqrt(
+            random_merge_db["ImageNet"] * random_merge_db["OOD"]
+        )
 
         plt.figure(figsize=(12, 12))
         ax = plt.gca()
@@ -438,31 +443,53 @@ if __name__ == "__main__":
         )
 
         value_colors = {
-            "random": "C5",  # purple
-            "mean": "C6",  # brown
-            "median": "C7",  # pink
+            "random": "C1",
+            "mean": "C0",
+            "median": "pink",
+            "max": "purple",  # Added for completeness
         }
         markers = {False: "o", True: "^"}
 
         plotted_labels = set()
+
+        if args.plot == "best":
+            best_configs = {}
+
+            for _, row in random_merge_db.iterrows():
+                params = row["params"]
+                value = params["value"]
+                elect_sign = params["elect_sign"]
+                use_base = params["use_base"]
+                alpha = 1.0 if not use_base else params["alpha"]
+
+                key = (value, elect_sign)
+                if (
+                    key not in best_configs
+                    or row["geo_mean"] > best_configs[key]["geo_mean"]
+                ):
+                    best_configs[key] = row
+
+            plot_data = list(best_configs.values())
+        else:
+            plot_data = random_merge_db.to_dict("records")
+
         sorted_data = sorted(
-            random_merge_db.iterrows(), key=lambda x: x[1]["params"]["value"]
+            plot_data,
+            key=lambda x: (x["params"]["value"]),
         )
 
         for row in sorted_data:
-            data = row[1]
-            params = data["params"]
+            params = row["params"]
             value = params["value"]
             elect_sign = params["elect_sign"]
             use_base = params["use_base"]
-            alpha = params["alpha"]
+            alpha = 1.0 if not use_base else params["alpha"]
 
             # Construct label
             label_parts = [value.capitalize()]
             if elect_sign:
                 label_parts.append("elect sign")
-            if use_base and alpha is not None:
-                label_parts.append(f"alpha={alpha:.1f}")
+            label_parts.append(f"alpha={alpha:.1f}")
 
             label = " ".join(
                 [
@@ -480,8 +507,8 @@ if __name__ == "__main__":
             if use_base:
                 color_alpha = 0.4 + (0.5 * alpha) if alpha is not None else 0.65
                 ax.scatter(
-                    data["ImageNet"],
-                    data["OOD"],
+                    row["ImageNet"],
+                    row["OOD"],
                     marker=markers[elect_sign],
                     color=value_colors[value],
                     s=200,
@@ -492,8 +519,8 @@ if __name__ == "__main__":
                 )
             else:
                 ax.scatter(
-                    data["ImageNet"],
-                    data["OOD"],
+                    row["ImageNet"],
+                    row["OOD"],
                     marker=markers[elect_sign],
                     edgecolors=value_colors[value],
                     facecolors="none",
@@ -507,4 +534,4 @@ if __name__ == "__main__":
         ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
         ax.grid()
         ax.legend(fontsize=13, ncol=2, facecolor="white").set_zorder(100)
-        plt.savefig("figure.png", bbox_inches="tight")
+        plt.savefig(f"figure_{args.plot}.png", bbox_inches="tight")
