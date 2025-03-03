@@ -7,7 +7,7 @@ import numpy as np
 import re
 
 
-def random_merge(
+def merge(
     model_paths: List[str],
     base_model: torch.nn.Module,
     use_base: bool = False,
@@ -32,7 +32,6 @@ def random_merge(
     Returns:
         Merged model instance
     """
-    # Get the pattern based on the variant
     pattern = get_pattern_for_variant(variant)
 
     cache_path = get_cache_path(value, elect_sign, use_base, alpha, variant)
@@ -52,33 +51,10 @@ def random_merge(
     if use_base:
         model_vectors = [mv - base_vector for mv in model_vectors]
 
-    total_params = len(base_vector)
-    num_models = len(model_paths)
-
     print("Merging models...")
     model_vectors = torch.stack(model_vectors)
 
-    if value == "random":
-        random_indices = torch.randint(0, num_models, (total_params,), device="cpu")
-        merged_vector = model_vectors[random_indices, torch.arange(total_params)]
-    elif value == "mean":
-        merged_vector = model_vectors.mean(dim=0)
-    elif value == "max":
-        max_abs_indices = model_vectors.abs().max(dim=0)[1]
-        merged_vector = torch.gather(
-            model_vectors, 0, max_abs_indices.unsqueeze(0)
-        ).squeeze(0)
-    elif value == "median":
-        merged_vector = torch.median(model_vectors, dim=0)[0]
-    else:
-        raise ValueError(
-            f"Unknown value method: {value}. Choose from: random, mean, max, median"
-        )
-
-    if elect_sign:
-        param_sums = model_vectors.sum(dim=0)
-        elected_signs = torch.sign(param_sums)
-        merged_vector = merged_vector.abs() * elected_signs
+    merged_vector = merge_vectors(model_vectors, value, elect_sign)
 
     if use_base:
         merged_vector = base_vector + alpha * merged_vector
@@ -90,6 +66,45 @@ def random_merge(
         torch.save(merged_state_dict, cache_path)
 
     return get_model_from_sd(merged_state_dict, base_model)
+
+
+def get_cache_path(
+    value: str,
+    elect_sign: bool,
+    use_base: bool,
+    alpha: Optional[float] = None,
+    variant: str = "all",
+) -> str:
+    """Generate a standardized cache path for merged models.
+
+    Args:
+        value: Merge method (random, mean, max, median)
+        elect_sign: Whether sign election was used
+        use_base: Whether base model + task vectors were used
+        alpha: Scaling factor for task vectors (only used if use_base=True)
+        variant: The variant of the model being merged
+
+    Returns:
+        str: Path where the merged model should be cached
+    """
+    work_dir = os.environ.get("WORK", ".")
+    model_dir = Path(work_dir) / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    parts = [value]
+    if elect_sign:
+        parts.append("elect_sign")
+    if use_base:
+        parts.append("use_base")
+        if alpha is not None:
+            parts.append(f"alpha_{alpha:.1f}")
+
+    # Only append variant to filename if it's not "all"
+    if variant != "all":
+        parts.append(variant)
+
+    filename = "_".join(parts) + ".pt"
+    return str(model_dir / filename)
 
 
 def get_pattern_for_variant(variant: str) -> Optional[str]:
@@ -134,6 +149,51 @@ def state_dict_to_vector(state_dict, pattern=None):
     )
 
 
+def merge_vectors(
+    model_vectors: torch.Tensor,
+    value: str = "random",
+    elect_sign: bool = False,
+) -> torch.Tensor:
+    """Merge multiple model vectors using the specified method.
+
+    Args:
+        model_vectors: Tensor of shape [num_models, num_params] containing model vectors
+        value: Method to compute parameter values from multiple models
+               Options: "random", "mean", "max", "median"
+        elect_sign: Whether to use sign election for merging
+
+    Returns:
+        Merged vector of shape [num_params]
+    """
+    num_models, total_params = model_vectors.shape
+
+    if value == "random":
+        random_indices = torch.randint(
+            0, num_models, (total_params,), device=model_vectors.device
+        )
+        merged_vector = model_vectors[random_indices, torch.arange(total_params)]
+    elif value == "mean":
+        merged_vector = model_vectors.mean(dim=0)
+    elif value == "max":
+        max_abs_indices = model_vectors.abs().max(dim=0)[1]
+        merged_vector = torch.gather(
+            model_vectors, 0, max_abs_indices.unsqueeze(0)
+        ).squeeze(0)
+    elif value == "median":
+        merged_vector = torch.median(model_vectors, dim=0)[0]
+    else:
+        raise ValueError(
+            f"Unknown value method: {value}. Choose from: random, mean, max, median"
+        )
+
+    if elect_sign:
+        param_sums = model_vectors.sum(dim=0)
+        elected_signs = torch.sign(param_sums)
+        merged_vector = merged_vector.abs() * elected_signs
+
+    return merged_vector
+
+
 def vector_to_state_dict(vector, state_dict, pattern=None):
     """Convert a flattened vector back to a state dictionary.
 
@@ -156,42 +216,3 @@ def vector_to_state_dict(vector, state_dict, pattern=None):
     torch.nn.utils.vector_to_parameters(vector, filtered_values)
 
     return result_dict
-
-
-def get_cache_path(
-    value: str,
-    elect_sign: bool,
-    use_base: bool,
-    alpha: Optional[float] = None,
-    variant: str = "all",
-) -> str:
-    """Generate a standardized cache path for merged models.
-
-    Args:
-        value: Merge method (random, mean, max, median)
-        elect_sign: Whether sign election was used
-        use_base: Whether base model + task vectors were used
-        alpha: Scaling factor for task vectors (only used if use_base=True)
-        variant: The variant of the model being merged
-
-    Returns:
-        str: Path where the merged model should be cached
-    """
-    work_dir = os.environ.get("WORK", ".")
-    model_dir = Path(work_dir) / "models"
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    parts = [value]
-    if elect_sign:
-        parts.append("elect_sign")
-    if use_base:
-        parts.append("use_base")
-        if alpha is not None:
-            parts.append(f"alpha_{alpha:.1f}")
-
-    # Only append variant to filename if it's not "all"
-    if variant != "all":
-        parts.append(variant)
-
-    filename = "_".join(parts) + ".pt"
-    return str(model_dir / filename)
