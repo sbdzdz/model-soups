@@ -8,7 +8,7 @@ import numpy as np
 
 from datasets import ImageNet
 from utils import test_model_on_dataset
-from merge import random_merge
+from merge import merge
 
 
 def parse_arguments():
@@ -28,7 +28,7 @@ def parse_arguments():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=1024,
     )
     parser.add_argument(
         "--workers",
@@ -54,8 +54,23 @@ def main():
         with open(RESULTS_FILE, "r") as f:
             results = json.load(f)
         print(f"Loaded existing results from {RESULTS_FILE}")
+
+        if "uniform_accuracy" not in results:
+            results["uniform_accuracy"] = [None] * len(results["num_models"])
+
+        if "random_accuracy" not in results:
+            results["random_accuracy"] = [None] * len(results["num_models"])
+
+        if "random_elect_sign_accuracy" not in results:
+            results["random_elect_sign_accuracy"] = [None] * len(results["num_models"])
+
     else:
-        results = {"num_models": [], "uniform_accuracy": [], "random_accuracy": []}
+        results = {
+            "num_models": [],
+            "uniform_accuracy": [],
+            "random_accuracy": [],
+            "random_elect_sign_accuracy": [],
+        }
 
     # Get sorted models based on ImageNet2p accuracy
     INDIVIDUAL_MODEL_RESULTS_FILE = "individual_model_results.jsonl"
@@ -87,43 +102,86 @@ def main():
     model_counts = [2, 5, 10, 15, 20, 30, 40, 50, 60, 70]
 
     for num_models in model_counts:
-        if num_models in results["num_models"] and not args.overwrite:
-            print(f"Skipping {num_models} models - already evaluated")
+        # First check if this number of models is already in our results
+        if num_models in results.get("num_models", []):
+            idx = results["num_models"].index(num_models)
+
+            # Check if each merge type needs evaluation
+            need_uniform = (
+                args.overwrite
+                or "uniform_accuracy" not in results
+                or results["uniform_accuracy"][idx] is None
+            )
+            need_random = (
+                args.overwrite
+                or "random_accuracy" not in results
+                or results["random_accuracy"][idx] is None
+            )
+            need_random_elect = (
+                args.overwrite
+                or "random_elect_sign_accuracy" not in results
+                or results["random_elect_sign_accuracy"][idx] is None
+            )
+        else:
+            # If this number of models isn't in our results yet, we need to evaluate everything
+            need_uniform = True
+            need_random = True
+            need_random_elect = True
+
+            # Add this number of models to our results
+            results.setdefault("num_models", []).append(num_models)
+            results.setdefault("uniform_accuracy", []).append(None)
+            results.setdefault("random_accuracy", []).append(None)
+            results.setdefault("random_elect_sign_accuracy", []).append(None)
+            idx = len(results["num_models"]) - 1
+
+        if not (need_uniform or need_random or need_random_elect):
+            print(f"Skipping {num_models} models - already evaluated all merge types")
             continue
 
         print(f"\nEvaluating with top {num_models} models")
         selected_paths = model_paths[:num_models]
 
-        uniform_model = random_merge(
-            selected_paths,
-            base_model,
-            use_base=False,
-            elect_sign=False,
-            value="mean",
-            cache=False,
-        )
-        uniform_accuracy = test_model_on_dataset(uniform_model, imagenet_dataset)
-        print(f"Uniform merge accuracy: {uniform_accuracy:.2f}%")
-
-        random_model = random_merge(
-            selected_paths,
-            base_model,
-            use_base=False,
-            elect_sign=False,
-            value="random",
-            cache=False,
-        )
-        random_accuracy = test_model_on_dataset(random_model, imagenet_dataset)
-        print(f"Random merge accuracy: {random_accuracy:.2f}%")
-
-        if num_models in results["num_models"]:
-            idx = results["num_models"].index(num_models)
+        if need_uniform:
+            uniform_model = merge(
+                selected_paths,
+                base_model,
+                use_base=False,
+                elect_sign=False,
+                value="mean",
+                cache=False,
+            )
+            uniform_accuracy = test_model_on_dataset(uniform_model, imagenet_dataset)
+            print(f"Uniform merge accuracy: {uniform_accuracy:.2f}%")
             results["uniform_accuracy"][idx] = uniform_accuracy
+
+        if need_random:
+            random_model = merge(
+                selected_paths,
+                base_model,
+                use_base=False,
+                elect_sign=False,
+                value="random",
+                cache=False,
+            )
+            random_accuracy = test_model_on_dataset(random_model, imagenet_dataset)
+            print(f"Random merge accuracy: {random_accuracy:.2f}%")
             results["random_accuracy"][idx] = random_accuracy
-        else:
-            results["num_models"].append(num_models)
-            results["uniform_accuracy"].append(uniform_accuracy)
-            results["random_accuracy"].append(random_accuracy)
+
+        if need_random_elect:
+            random_elect_model = merge(
+                selected_paths,
+                base_model,
+                use_base=False,
+                elect_sign=True,
+                value="random",
+                cache=False,
+            )
+            random_elect_accuracy = test_model_on_dataset(
+                random_elect_model, imagenet_dataset
+            )
+            print(f"Random merge (elect sign) accuracy: {random_elect_accuracy:.2f}%")
+            results["random_elect_sign_accuracy"][idx] = random_elect_accuracy
 
         with open(RESULTS_FILE, "w") as f:
             json.dump(results, f, indent=2)
@@ -134,11 +192,25 @@ def main():
         results["num_models"],
         results["uniform_accuracy"],
         "o-",
-        label="Uniform Average",
+        color="tab:blue",
+        label="Uniform",
     )
     plt.plot(
-        results["num_models"], results["random_accuracy"], "s-", label="Random Merge"
+        results["num_models"],
+        results["random_accuracy"],
+        "s-",
+        color="tab:red",
+        label="Random",
     )
+
+    plt.plot(
+        results["num_models"],
+        results["random_elect_sign_accuracy"],
+        "^-",
+        color="tab:green",
+        label="Random (elect sign)",
+    )
+
     plt.xlabel("Number of Models Merged", fontsize=14)
     plt.ylabel("ImageNet Accuracy (%)", fontsize=14)
     plt.title("Model Accuracy vs. Number of Merged Models", fontsize=16)
