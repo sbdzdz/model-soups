@@ -78,6 +78,26 @@ def parse_arguments():
         default=False,
         help="Whether to overwrite existing results",
     )
+    parser.add_argument(
+        "--merge-strategies",
+        nargs="+",
+        default=["random", "mean", "median"],
+        help="Merge strategies to evaluate",
+    )
+    parser.add_argument(
+        "--use-base",
+        nargs="+",
+        type=lambda x: x.lower() == "true",
+        default=[False, True],
+        help="Whether to use base model (True/False)",
+    )
+    parser.add_argument(
+        "--elect-sign",
+        nargs="+",
+        type=lambda x: x.lower() == "true",
+        default=[False, True],
+        help="Whether to elect sign (True/False)",
+    )
     return parser.parse_args()
 
 
@@ -123,9 +143,9 @@ def main():
             results = json.load(f)
 
     configs = []
-    for merge_strategy in ["random", "mean", "median"]:
-        for use_base in [False, True]:
-            for elect_sign in [False, True]:
+    for merge_strategy in args.merge_strategies:
+        for use_base in args.use_base:
+            for elect_sign in args.elect_sign:
                 for variant in [
                     "all",
                     "transformer_only",
@@ -168,7 +188,6 @@ def main():
         if config["alpha"] is not None:
             config_name += f"_alpha_{config['alpha']:.1f}"
 
-        # Add variant name to config name
         config_name += f"_{config['variant']}"
 
         if config_name in results and not args.overwrite:
