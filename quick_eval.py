@@ -69,7 +69,7 @@ def parse_arguments():
     parser.add_argument(
         "--output",
         type=str,
-        default="merge_results.json",
+        default="quick_eval_results.json",
         help="Output file for results",
     )
     parser.add_argument(
@@ -197,8 +197,14 @@ def main():
 
         config_name += f"_{config['variant']}"
 
-        if config_name in results and not args.overwrite:
-            print(f"Skipping {config_name} - already evaluated")
+        if config_name not in results:
+            results[config_name] = {"config": config}
+
+        all_dataset_evaluated = all(
+            dataset_name in results[config_name] for dataset_name in datasets_to_eval
+        )
+        if all_dataset_evaluated:
+            print(f"Skipping {config_name} - all datasets already evaluated")
             continue
 
         print(f"\nMerging models with configuration: {config_name}")
@@ -212,24 +218,22 @@ def main():
             variant=config["variant"],
         )
 
-        config_results = {"config": config}
         for dataset_name in datasets_to_eval:
+            if dataset_name in results[config_name] and not args.overwrite:
+                print(f"Skipping {dataset_name} for {config_name} - already evaluated")
+                continue
+
+            print(f"Evaluating on {dataset_name}...")
             dataset_cls = get_dataset_class(dataset_name)
-            if dataset_cls:
-                print(f"Evaluating on {dataset_name}...")
-                dataset = dataset_cls(
-                    preprocess, args.dataset_location, args.batch_size, args.workers
-                )
-                accuracy = test_model_on_dataset(model, dataset)
-                config_results[dataset_name] = accuracy
-                print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
-            else:
-                print(f"Unknown dataset: {dataset_name}")
+            dataset = dataset_cls(
+                preprocess, args.dataset_location, args.batch_size, args.workers
+            )
+            accuracy = test_model_on_dataset(model, dataset)
+            results[config_name][dataset_name] = accuracy
+            print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
 
-        results[config_name] = config_results
-
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2)
+            with open(args.output, "w") as f:
+                json.dump(results, f, indent=2)
 
     print("\n=== FINAL RESULTS ===")
     table_data = []
