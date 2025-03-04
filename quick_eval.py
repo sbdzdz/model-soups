@@ -6,8 +6,8 @@ from pathlib import Path
 from tabulate import tabulate
 from tqdm import tqdm
 import numpy as np
-from typing import List, Optional
-import torch
+from typing import List
+import matplotlib.pyplot as plt
 
 from datasets import (
     ImageNet2p,
@@ -98,6 +98,13 @@ def parse_arguments():
         default=[False, True],
         help="Whether to elect sign (True/False)",
     )
+    parser.add_argument(
+        "--alpha",
+        nargs="+",
+        type=float,
+        default=[1.0],
+        help="List of scaling factors for merged task vectors",
+    )
     return parser.parse_args()
 
 
@@ -155,7 +162,7 @@ def main():
                     "late_layers",
                 ]:
                     if use_base:
-                        for alpha in np.arange(0.1, 1.3, 0.1):
+                        for alpha in args.alpha:
                             configs.append(
                                 {
                                     "use_base": use_base,
@@ -215,7 +222,7 @@ def main():
                 )
                 accuracy = test_model_on_dataset(model, dataset)
                 config_results[dataset_name] = accuracy
-                print(f"{dataset_name} accuracy: {accuracy:.2f}%")
+                print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
             else:
                 print(f"Unknown dataset: {dataset_name}")
 
@@ -232,7 +239,7 @@ def main():
         row = [config_name]
         for dataset in datasets_to_eval:
             if dataset in config_results:
-                row.append(f"{config_results[dataset]:.2f}%")
+                row.append(f"{config_results[dataset] * 100:.2f}%")
             else:
                 row.append("N/A")
         table_data.append(row)
@@ -246,6 +253,158 @@ def main():
 
     print(tabulate(table_data, headers=headers, tablefmt="grid"))
     print(f"\nResults saved to {args.output}")
+
+    # Create a scatter plot if datasets is set to "all"
+    if "all" in args.datasets or set(datasets_to_eval) == set(
+        [
+            "imagenet2p",
+            "imagenet",
+            "imagenet_v2",
+            "imagenet_sketch",
+            "imagenet_r",
+            "objectnet",
+            "imagenet_a",
+        ]
+    ):
+        create_scatter_plot(results)
+
+
+def create_scatter_plot(results):
+
+    ood_datasets = [
+        "ImageNetV2",
+        "ImageNetSketch",
+        "ImageNetR",
+        "ObjectNet",
+        "ImageNetA",
+    ]
+
+    plt.figure(figsize=(12, 8))
+    ax = plt.gca()
+
+    value_colors = {
+        "random": "C1",
+        "mean": "C0",
+        "median": "pink",
+        "max": "purple",
+    }
+    markers = {False: "o", True: "^"}
+
+    for config_results in results.values():
+        config = config_results["config"]
+        value = config["value"]
+        elect_sign = config["elect_sign"]
+        use_base = config["use_base"]
+        alpha = config["alpha"]
+        variant = config["variant"]
+
+        ood_accs = [
+            config_results[dataset]
+            for dataset in ood_datasets
+            if dataset in config_results
+        ]
+        ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+
+        imagenet_acc = config_results.get("imagenet", 0)
+
+        label_parts = [value.capitalize()]
+        if elect_sign:
+            label_parts.append("elect sign")
+        if use_base and alpha is not None:
+            label_parts.append(f"alpha={alpha:.1f}")
+        if variant:
+            label_parts.append(variant)
+
+        label = " ".join(
+            [
+                label_parts[0],
+                f"({', '.join(label_parts[1:])})" if len(label_parts) > 1 else "",
+            ]
+        ).strip()
+
+        if use_base:
+            color_alpha = 0.4 + (0.5 * alpha) if alpha is not None else 0.65
+            ax.scatter(
+                imagenet_acc,
+                ood_acc,
+                marker=markers[elect_sign],
+                color=value_colors.get(value, "gray"),
+                s=200,
+                label=label,
+                alpha=color_alpha,
+                zorder=5,
+                linewidth=0,
+            )
+        else:
+            ax.scatter(
+                imagenet_acc,
+                ood_acc,
+                marker=markers[elect_sign],
+                edgecolors=value_colors.get(value, "gray"),
+                facecolors="none",
+                s=200,
+                label=label,
+                linewidth=2,
+                zorder=5,
+            )
+
+    # Add greedy soup results
+    with open("greedy_soup_results.jsonl", "r") as f:
+        greedy_soup_data = json.loads(f.readline())
+
+    ood_accs = [
+        greedy_soup_data[dataset]
+        for dataset in ood_datasets
+        if dataset in greedy_soup_data
+    ]
+    greedy_ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+
+    ax.scatter(
+        greedy_soup_data.get("ImageNet", 0.0),
+        greedy_ood_acc,
+        marker="*",
+        color="C4",
+        s=400,
+        label="Greedy Soup",
+        zorder=10,
+    )
+
+    # Add base model results
+    with open("individual_model_results.jsonl", "r") as f:
+        base_model_data = json.loads(f.readline())
+
+    base_ood_accs = [
+        base_model_data[dataset]
+        for dataset in ood_datasets
+        if dataset in base_model_data
+    ]
+    base_ood_acc = sum(base_ood_accs) / len(base_ood_accs) if base_ood_accs else 0
+
+    ax.scatter(
+        base_model_data.get("ImageNet", 0.0),
+        base_ood_acc,
+        marker="h",
+        color="slategray",
+        s=150,
+        label="Initialization (LP)",
+        zorder=10,
+    )
+
+    # Set labels and grid
+    ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
+    ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
+    ax.grid(True)
+
+    # Add legend with unique entries
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(
+        by_label.values(), by_label.keys(), fontsize=13, ncol=2, facecolor="white"
+    ).set_zorder(100)
+
+    plt.savefig("merge_comparison_plot.png", bbox_inches="tight")
+    plt.close()
+    print("Scatter plot saved as merge_comparison_plot.png")
 
 
 if __name__ == "__main__":
