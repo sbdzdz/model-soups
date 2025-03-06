@@ -275,14 +275,6 @@ def main():
 
 def create_scatter_plot(results):
 
-    ood_datasets = [
-        "ImageNetV2",
-        "ImageNetSketch",
-        "ImageNetR",
-        "ObjectNet",
-        "ImageNetA",
-    ]
-
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
 
@@ -293,6 +285,14 @@ def create_scatter_plot(results):
         "max": "purple",
     }
     markers = {False: "o", True: "^"}
+
+    ood_datasets = [
+        "imagenet_v2",
+        "imagenet_sketch",
+        "imagenet_r",
+        "objectnet",
+        "imagenet_a",
+    ]
 
     for config_results in results.values():
         config = config_results["config"]
@@ -351,6 +351,14 @@ def create_scatter_plot(results):
                 linewidth=2,
                 zorder=5,
             )
+
+    ood_datasets = [
+        "ImageNetV2",
+        "ImageNetSketch",
+        "ImageNetR",
+        "ObjectNet",
+        "ImageNetA",
+    ]
 
     # Add greedy soup results
     with open("greedy_soup_results.jsonl", "r") as f:
