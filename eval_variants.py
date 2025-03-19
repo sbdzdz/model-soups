@@ -41,9 +41,9 @@ def parse_arguments():
     parser.add_argument(
         "--datasets",
         nargs="+",
-        default=["imagenet2p"],
+        default=["ImageNet2p"],
         choices=[
-            "imagenet2p",
+            "ImageNet2p",
             "imagenet",
             "imagenet_v2",
             "imagenet_sketch",
@@ -110,7 +110,7 @@ def parse_arguments():
 
 def get_dataset_class(dataset_name):
     dataset_map = {
-        "imagenet2p": ImageNet2p,
+        "ImageNet2p": ImageNet2p,
         "imagenet": ImageNet,
         "imagenet_v2": ImageNetV2,
         "imagenet_sketch": ImageNetSketch,
@@ -133,7 +133,7 @@ def main():
     datasets_to_eval = []
     if "all" in args.datasets:
         datasets_to_eval = [
-            "imagenet2p",
+            "ImageNet2p",
             "imagenet",
             "imagenet_v2",
             "imagenet_sketch",
@@ -248,8 +248,8 @@ def main():
                 row.append("N/A")
         table_data.append(row)
 
-    if "imagenet2p" in datasets_to_eval:
-        idx = datasets_to_eval.index("imagenet2p") + 1
+    if "ImageNet2p" in datasets_to_eval:
+        idx = datasets_to_eval.index("ImageNet2p") + 1
         table_data.sort(
             key=lambda x: float(x[idx].rstrip("%")) if x[idx] != "N/A" else 0,
             reverse=True,
@@ -261,7 +261,7 @@ def main():
     # Create a scatter plot if datasets is set to "all"
     if "all" in args.datasets or set(datasets_to_eval) == set(
         [
-            "imagenet2p",
+            "ImageNet2p",
             "imagenet",
             "imagenet_v2",
             "imagenet_sketch",
