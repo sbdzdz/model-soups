@@ -17,7 +17,6 @@ class LearnedMerge(torch.nn.Module):
         super().__init__()
         self.model = model
         self.checkpoints = checkpoints
-
         num_params = len(checkpoints[0])
         num_models = len(checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_params, num_models), dim=1)
@@ -34,9 +33,10 @@ class LearnedMerge(torch.nn.Module):
             stacked_params = torch.stack(
                 [params[param_name] for params in self.checkpoints], dim=-1
             )
-            weights = self.alpha[idx]
+            weights = self.alpha[idx].cpu()
             combined_params[param_name] = (stacked_params @ weights).squeeze()
 
+        combined_params = {k: v.to(x.device) for k, v in combined_params.items()}
         output = func.functional_call(self.model, combined_params, (x,))
 
         return self.beta * output
@@ -47,6 +47,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     base_model, preprocess = clip.load("ViT-B/32", device="cpu", jit=False)
+
     train_dataset = ImageNet2pShuffled(
         preprocess,
         location=args.data_location,
@@ -66,9 +67,9 @@ def main(args):
     checkpoints = [torch.load(path, map_location="cpu") for path in model_paths]
     feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
     num_classes = checkpoints[0]["classification_head.weight"].shape[0]
-
     model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
-    alpha_model = LearnedMerge(model, checkpoints).to(device)
+    alpha_model = LearnedMerge(model, checkpoints)
+
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(alpha_model.parameters(), lr=0.05, weight_decay=0.0)
     epochs = 5
@@ -120,7 +121,7 @@ def parse_arguments():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=512,
+        default=256,
     )
     return parser.parse_args()
 
