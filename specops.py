@@ -2,9 +2,9 @@ import argparse
 from pathlib import Path
 import wget
 import torch
+from torch import func
 import clip
 import time
-import torch.nn.utils.stateless as stateless
 from torch.utils.data import DataLoader
 from datasets.imagenet import ImageNet2pShuffled, ImageNet
 from utils import ModelWrapper, maybe_dictionarize_batch
@@ -34,18 +34,19 @@ def parse_arguments():
 
 
 class ModernAlphaWrapper(torch.nn.Module):
-    def __init__(self, model, parameter_lists):
+    def __init__(self, model, checkpoints):
         super().__init__()
         self.model = model
-        self.parameter_lists = parameter_lists
+        self.checkpoints = checkpoints
 
-        num_params = len(parameter_lists[0])
-        num_models = len(parameter_lists)
+        num_params = len(checkpoints[0])
+        num_models = len(checkpoints)
         ralpha = torch.ones(num_params, num_models)
         ralpha = torch.nn.functional.softmax(ralpha, dim=1)
         self.alpha_raw = torch.nn.Parameter(ralpha)
         self.beta = torch.nn.Parameter(torch.tensor(1.0))
 
+    @property
     def alpha(self):
         return torch.nn.functional.softmax(self.alpha_raw, dim=1)
 
@@ -53,27 +54,27 @@ class ModernAlphaWrapper(torch.nn.Module):
         alpha_weights = self.alpha()
 
         combined_params = {}
-        for idx, param_name in enumerate(self.parameter_lists[0].keys()):
+        for idx, param_name in enumerate(self.checkpoints[0].keys()):
             stacked_params = torch.stack(
-                [params[param_name] for params in self.parameter_lists], dim=-1
+                [params[param_name] for params in self.checkpoints], dim=-1
             )
 
             weights = alpha_weights[idx]
             combined_params[param_name] = (stacked_params @ weights).squeeze()
 
-        output = stateless.functional_call(self.model, combined_params, (x,))
+        output = func.functional_call(self.model, combined_params, (x,))
 
         return self.beta * output
 
 
-def evaluate_model(model, test_dset, criterion, device):
+def evaluate_model(model, dataset, criterion, device):
     model.eval()
     with torch.no_grad():
         correct = 0.0
         n = 0
         total_loss = 0.0
 
-        for i, batch in enumerate(test_dset.test_loader):
+        for i, batch in enumerate(dataset.test_loader):
             batch = maybe_dictionarize_batch(batch)
             inputs, labels = batch["images"].to(device), batch["labels"].to(device)
 
@@ -86,10 +87,10 @@ def evaluate_model(model, test_dset, criterion, device):
             n += labels.size(0)
 
             if i % 10 == 0:
-                print(f"Eval Progress: [{i}/{len(test_dset.test_loader)}]")
+                print(f"Eval Progress: [{i}/{len(dataset.test_loader)}]")
 
         acc = correct / float(n)
-        avg_loss = total_loss / len(test_dset.test_loader)
+        avg_loss = total_loss / len(dataset.test_loader)
         print(f"Evaluation - Accuracy: {100*acc:.2f}%, Avg Loss: {avg_loss:.4f}")
     return acc
 
@@ -102,13 +103,13 @@ def main():
     data_location = Path(args.data_location)
 
     base_model, preprocess = clip.load("ViT-B/32", device="cpu", jit=False)
-    train_dset = ImageNet2pShuffled(
+    train_dataset = ImageNet2pShuffled(
         preprocess,
         location=data_location,
         batch_size=args.batch_size,
         num_workers=min(multiprocessing.cpu_count() * 4, 16),
     )
-    test_dset = ImageNet(
+    test_dataset = ImageNet(
         preprocess,
         location=data_location,
         batch_size=args.batch_size,
@@ -132,7 +133,7 @@ def main():
         epoch_loss = 0.0
         start_time = time.time()
 
-        for i, batch in enumerate(train_dset.train_loader):
+        for i, batch in enumerate(train_dataset.train_loader):
             batch = maybe_dictionarize_batch(batch)
             inputs, labels = batch["images"].to(device), batch["labels"].to(device)
 
@@ -145,17 +146,17 @@ def main():
             epoch_loss += loss.item()
 
             if i % 10 == 0:
-                percent_complete = 100.0 * i / len(train_dset.train_loader)
+                percent_complete = 100.0 * i / len(train_dataset.train_loader)
                 print(
-                    f"Epoch: {epoch} [{percent_complete:.0f}% {i}/{len(train_dset.train_loader)}] "
+                    f"Epoch: {epoch} [{percent_complete:.0f}% {i}/{len(train_dataset.train_loader)}] "
                     f"Loss: {loss.item():.4f} Time: {time.time()-start_time:.2f}s"
                 )
                 start_time = time.time()
 
-        acc = evaluate_model(alpha_model, test_dset, criterion, device)
+        acc = evaluate_model(alpha_model, test_dataset, criterion, device)
         print(f"Epoch {epoch} Accuracy: {100*acc:.2f}%")
 
-    final_acc = evaluate_model(alpha_model, test_dset, criterion, device)
+    final_acc = evaluate_model(alpha_model, test_dataset, criterion, device)
     print(f"Final Accuracy: {100*final_acc:.2f}%")
 
     torch.save(
