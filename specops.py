@@ -45,13 +45,14 @@ class LearnedMerge(torch.nn.Module):
 
 def main(args):
     wandb.init(
-        project="model-soups",
+        entity="codis",
+        project="specops",
         config={
             "num_models": num_models,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
-            "weight_decay": 0.0,
-            "epochs": 5,
+            "weight_decay": args.weight_decay,
+            "epochs": args.epochs,
         },
     )
 
@@ -84,11 +85,10 @@ def main(args):
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(
-        alpha_model.parameters(), lr=args.learning_rate, weight_decay=0.0
+        alpha_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
-    epochs = 5
 
-    for epoch in range(epochs):
+    for epoch in range(args.epochs):
         alpha_model.train()
 
         epoch_loss = 0.0
@@ -175,6 +175,18 @@ def parse_arguments():
         type=float,
         default=0.005,
         help="Learning rate for the optimizer",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for the optimizer",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=5,
+        help="Number of training epochs",
     )
     parser.add_argument(
         "--wandb-project",
