@@ -35,9 +35,10 @@ class LearnedMerge(torch.nn.Module):
                 [params[param_name] for params in self.checkpoints], dim=-1
             )
             weights = self.alpha[idx].cpu()
-            combined_params[param_name] = (stacked_params @ weights).squeeze()
+            combined_params[param_name] = (
+                (stacked_params @ weights).squeeze().to(x.device)
+            )
 
-        combined_params = {k: v.to(x.device) for k, v in combined_params.items()}
         output = func.functional_call(self.model, combined_params, (x,))
 
         return self.beta * output
@@ -117,15 +118,6 @@ def main(args):
         epoch_loss = epoch_loss / len(train_dataset.train_loader)
         print(f"Epoch {epoch} Average Loss: {epoch_loss:.4f}")
 
-        accuracy = test_model_on_dataset(alpha_model, test_dataset)
-        print(f"Epoch {epoch} Accuracy: {100*accuracy:.2f}%")
-
-        wandb.log(
-            {
-                "val/accuracy": accuracy,
-            }
-        )
-
     alpha_distributions = alpha_model.alpha()
     for idx, param_name in enumerate(alpha_model.checkpoints[0].keys()):
         wandb.log(
@@ -171,7 +163,7 @@ def parse_arguments():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.0001,
+        default=0.001,
         help="Learning rate for the optimizer",
     )
     parser.add_argument(
