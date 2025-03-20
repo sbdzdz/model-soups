@@ -1,5 +1,5 @@
 import argparse
-import os
+from pathlib import Path
 import wget
 import torch
 import clip
@@ -8,6 +8,7 @@ import torch.nn.utils.stateless as stateless
 from torch.utils.data import DataLoader
 from datasets.imagenet import ImageNet2pShuffled, ImageNet
 from utils import ModelWrapper, maybe_dictionarize_batch
+import multiprocessing
 
 
 def parse_arguments():
@@ -15,29 +16,19 @@ def parse_arguments():
     parser.add_argument(
         "--data-location",
         type=str,
-        default=os.path.expanduser("~/data"),
+        default=str(Path.home() / "data"),
         help="The root directory for the datasets.",
     )
     parser.add_argument(
         "--model-location",
         type=str,
-        default=os.path.expanduser("~/ssd/checkpoints/soups"),
+        default=str(Path.home() / "ssd" / "checkpoints" / "soups"),
         help="Where to download the models.",
-    )
-    parser.add_argument(
-        "--download-models",
-        action="store_true",
-        default=False,
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=8,
+        default=512,
     )
     return parser.parse_args()
 
@@ -48,7 +39,6 @@ class ModernAlphaWrapper(torch.nn.Module):
         self.model = model
         self.parameter_lists = parameter_lists
 
-        # Initialize mixing weights
         num_params = len(parameter_lists[0])
         num_models = len(parameter_lists)
         ralpha = torch.ones(num_params, num_models)
@@ -106,53 +96,37 @@ def evaluate_model(model, test_dset, criterion, device):
 
 def main():
     args = parse_arguments()
-    NUM_MODELS = 72
+    num_models = 72
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_location = Path(args.model_location)
+    data_location = Path(args.data_location)
 
-    # Download models if needed
-    if args.download_models:
-        if not os.path.exists(args.model_location):
-            os.makedirs(args.model_location)
-        for i in range(NUM_MODELS):
-            print(f"\nDownloading model {i} of {NUM_MODELS - 1}")
-            wget.download(
-                f"https://github.com/mlfoundations/model-soups/releases/download/v0.0.2/model_{i}.pt",
-                out=args.model_location,
-            )
-
-    # Load base model and datasets
     base_model, preprocess = clip.load("ViT-B/32", device="cpu", jit=False)
     train_dset = ImageNet2pShuffled(
         preprocess,
-        location=args.data_location,
+        location=data_location,
         batch_size=args.batch_size,
-        num_workers=args.workers,
+        num_workers=min(multiprocessing.cpu_count() * 4, 16),
     )
     test_dset = ImageNet(
         preprocess,
-        location=args.data_location,
+        location=data_location,
         batch_size=args.batch_size,
-        num_workers=args.workers,
+        num_workers=min(multiprocessing.cpu_count() * 4, 16),
     )
 
-    # Load model checkpoints
-    model_paths = [
-        os.path.join(args.model_location, f"model_{i}.pt") for i in range(NUM_MODELS)
-    ]
+    model_paths = [model_location / f"model_{i}.pt" for i in range(num_models)]
     parameter_lists = [torch.load(cp, map_location="cpu") for cp in model_paths]
 
-    # Setup model
     feature_dim = parameter_lists[0]["classification_head.weight"].shape[1]
     num_classes = parameter_lists[0]["classification_head.weight"].shape[0]
     model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
     alpha_model = ModernAlphaWrapper(model, parameter_lists).to(device)
 
-    # Training setup
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(alpha_model.parameters(), lr=0.05, weight_decay=0.0)
     epochs = 5
 
-    # Training loop
     for epoch in range(epochs):
         alpha_model.train()
         epoch_loss = 0.0
@@ -178,26 +152,14 @@ def main():
                 )
                 start_time = time.time()
 
-        # Evaluate after each epoch
-        print(f"\nEvaluating epoch {epoch}")
         acc = evaluate_model(alpha_model, test_dset, criterion, device)
+        print(f"Epoch {epoch} Accuracy: {100*acc:.2f}%")
 
-        # Optional: save checkpoints
-        # torch.save({
-        #     'epoch': epoch,
-        #     'model_state_dict': alpha_model.state_dict(),
-        #     'optimizer_state_dict': optimizer.state_dict(),
-        #     'accuracy': acc,
-        # }, f'checkpoint_epoch_{epoch}.pt')
-
-    # Final evaluation
-    print("\nFinal Evaluation:")
     final_acc = evaluate_model(alpha_model, test_dset, criterion, device)
     print(f"Final Accuracy: {100*final_acc:.2f}%")
 
-    # Save final weights
     torch.save(
-        {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, f"alphas_final.pt"
+        {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, "alphas_final.pt"
     )
 
 
