@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from datasets.imagenet import ImageNet2pShuffled, ImageNet
 from utils import ModelWrapper, maybe_dictionarize_batch, test_model_on_dataset
 import multiprocessing
+import wandb
 
 
 class LearnedMerge(torch.nn.Module):
@@ -43,6 +44,18 @@ class LearnedMerge(torch.nn.Module):
 
 
 def main(args):
+    # Initialize wandb
+    wandb.init(
+        project="model-soups",
+        config={
+            "num_models": num_models,
+            "batch_size": args.batch_size,
+            "learning_rate": 0.05,
+            "weight_decay": 0.0,
+            "epochs": 5,
+        },
+    )
+
     num_models = 72
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -92,16 +105,50 @@ def main(args):
 
             if i % 10 == 0:
                 print(f"Epoch {epoch}, {i}/{num_batches}, Loss: {loss.item():.4f}")
+                wandb.log(
+                    {
+                        "train/loss": loss.item(),
+                        "train/step": epoch * len(train_dataset.train_loader) + i,
+                    }
+                )
 
         accuracy = test_model_on_dataset(alpha_model, test_dataset)
         print(f"Epoch {epoch} Accuracy: {100*accuracy:.2f}%")
+        wandb.log(
+            {
+                "val/accuracy": accuracy,
+                "val/epoch": epoch,
+            }
+        )
 
     final_accuracy = test_model_on_dataset(alpha_model, test_dataset)
     print(f"Final Accuracy: {100*final_accuracy:.2f}%")
 
+    # Log final metrics
+    wandb.log(
+        {
+            "final/accuracy": final_accuracy,
+            "final/beta": alpha_model.beta.item(),
+        }
+    )
+
+    # Log alpha distributions for each layer
+    alpha_distributions = alpha_model.alpha()
+    for idx, param_name in enumerate(alpha_model.checkpoints[0].keys()):
+        wandb.log(
+            {
+                f"alpha_distributions/{param_name}": wandb.Histogram(
+                    alpha_distributions[idx].detach().cpu().numpy()
+                )
+            }
+        )
+
+    # Save model weights
     torch.save(
         {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, "alphas_final.pt"
     )
+
+    wandb.finish()
 
 
 def parse_arguments():
@@ -122,6 +169,12 @@ def parse_arguments():
         "--batch-size",
         type=int,
         default=256,
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="model-soups",
+        help="Weights & Biases project name",
     )
     return parser.parse_args()
 
