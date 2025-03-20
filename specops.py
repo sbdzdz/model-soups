@@ -48,7 +48,6 @@ def main(args):
         entity="codis",
         project="specops",
         config={
-            "num_models": num_models,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
@@ -100,6 +99,9 @@ def main(args):
             outputs = alpha_model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
+
+            torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
             epoch_loss += loss.item()
@@ -112,38 +114,34 @@ def main(args):
                 }
             )
 
+        epoch_loss = epoch_loss / len(train_dataset.train_loader)
+        print(f"Epoch {epoch} Average Loss: {epoch_loss:.4f}")
+
         accuracy = test_model_on_dataset(alpha_model, test_dataset)
         print(f"Epoch {epoch} Accuracy: {100*accuracy:.2f}%")
+
         wandb.log(
             {
                 "val/accuracy": accuracy,
-                "val/epoch": epoch,
             }
         )
 
-    final_accuracy = test_model_on_dataset(alpha_model, test_dataset)
-    print(f"Final Accuracy: {100*final_accuracy:.2f}%")
-
-    # Log final metrics
-    wandb.log(
-        {
-            "final/accuracy": final_accuracy,
-            "final/beta": alpha_model.beta.item(),
-        }
-    )
-
-    # Log alpha distributions for each layer
     alpha_distributions = alpha_model.alpha()
     for idx, param_name in enumerate(alpha_model.checkpoints[0].keys()):
         wandb.log(
             {
                 f"alpha_distributions/{param_name}": wandb.Histogram(
                     alpha_distributions[idx].detach().cpu().numpy()
-                )
+                ),
             }
         )
 
-    # Save model weights
+    wandb.log(
+        {
+            "final/beta": alpha_model.beta.item(),
+        }
+    )
+
     torch.save(
         {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, "alphas_final.pt"
     )
@@ -173,7 +171,7 @@ def parse_arguments():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.005,
+        default=0.0001,
         help="Learning rate for the optimizer",
     )
     parser.add_argument(
