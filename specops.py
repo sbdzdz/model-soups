@@ -11,92 +11,7 @@ from utils import ModelWrapper, maybe_dictionarize_batch
 import multiprocessing
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--data-location",
-        type=str,
-        default=str(Path.home() / "data"),
-        help="The root directory for the datasets.",
-    )
-    parser.add_argument(
-        "--model-location",
-        type=str,
-        default=str(Path.home() / "ssd" / "checkpoints" / "soups"),
-        help="Where to download the models.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=512,
-    )
-    return parser.parse_args()
-
-
-class ModernAlphaWrapper(torch.nn.Module):
-    def __init__(self, model, checkpoints):
-        super().__init__()
-        self.model = model
-        self.checkpoints = checkpoints
-
-        num_params = len(checkpoints[0])
-        num_models = len(checkpoints)
-        ralpha = torch.ones(num_params, num_models)
-        ralpha = torch.nn.functional.softmax(ralpha, dim=1)
-        self.alpha_raw = torch.nn.Parameter(ralpha)
-        self.beta = torch.nn.Parameter(torch.tensor(1.0))
-
-    @property
-    def alpha(self):
-        return torch.nn.functional.softmax(self.alpha_raw, dim=1)
-
-    def forward(self, x):
-        alpha_weights = self.alpha()
-
-        combined_params = {}
-        for idx, param_name in enumerate(self.checkpoints[0].keys()):
-            stacked_params = torch.stack(
-                [params[param_name] for params in self.checkpoints], dim=-1
-            )
-
-            weights = alpha_weights[idx]
-            combined_params[param_name] = (stacked_params @ weights).squeeze()
-
-        output = func.functional_call(self.model, combined_params, (x,))
-
-        return self.beta * output
-
-
-def evaluate_model(model, dataset, criterion, device):
-    model.eval()
-    with torch.no_grad():
-        correct = 0.0
-        n = 0
-        total_loss = 0.0
-
-        for i, batch in enumerate(dataset.test_loader):
-            batch = maybe_dictionarize_batch(batch)
-            inputs, labels = batch["images"].to(device), batch["labels"].to(device)
-
-            logits = model(inputs)
-            loss = criterion(logits, labels)
-            total_loss += loss.item()
-
-            pred = logits.argmax(dim=1, keepdim=True)
-            correct += pred.eq(labels.view_as(pred)).sum().item()
-            n += labels.size(0)
-
-            if i % 10 == 0:
-                print(f"Eval Progress: [{i}/{len(dataset.test_loader)}]")
-
-        acc = correct / float(n)
-        avg_loss = total_loss / len(dataset.test_loader)
-        print(f"Evaluation - Accuracy: {100*acc:.2f}%, Avg Loss: {avg_loss:.4f}")
-    return acc
-
-
-def main():
-    args = parse_arguments()
+def main(args):
     num_models = 72
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_location = Path(args.model_location)
@@ -164,5 +79,90 @@ def main():
     )
 
 
+class ModernAlphaWrapper(torch.nn.Module):
+    def __init__(self, model, checkpoints):
+        super().__init__()
+        self.model = model
+        self.checkpoints = checkpoints
+
+        num_params = len(checkpoints[0])
+        num_models = len(checkpoints)
+        ralpha = torch.ones(num_params, num_models)
+        ralpha = torch.nn.functional.softmax(ralpha, dim=1)
+        self.alpha_raw = torch.nn.Parameter(ralpha)
+        self.beta = torch.nn.Parameter(torch.tensor(1.0))
+
+    @property
+    def alpha(self):
+        return torch.nn.functional.softmax(self.alpha_raw, dim=1)
+
+    def forward(self, x):
+        alpha_weights = self.alpha()
+
+        combined_params = {}
+        for idx, param_name in enumerate(self.checkpoints[0].keys()):
+            stacked_params = torch.stack(
+                [params[param_name] for params in self.checkpoints], dim=-1
+            )
+
+            weights = alpha_weights[idx]
+            combined_params[param_name] = (stacked_params @ weights).squeeze()
+
+        output = func.functional_call(self.model, combined_params, (x,))
+
+        return self.beta * output
+
+
+def evaluate_model(model, dataset, criterion, device):
+    model.eval()
+    with torch.no_grad():
+        correct = 0.0
+        n = 0
+        total_loss = 0.0
+
+        for i, batch in enumerate(dataset.test_loader):
+            batch = maybe_dictionarize_batch(batch)
+            inputs, labels = batch["images"].to(device), batch["labels"].to(device)
+
+            logits = model(inputs)
+            loss = criterion(logits, labels)
+            total_loss += loss.item()
+
+            pred = logits.argmax(dim=1, keepdim=True)
+            correct += pred.eq(labels.view_as(pred)).sum().item()
+            n += labels.size(0)
+
+            if i % 10 == 0:
+                print(f"Eval Progress: [{i}/{len(dataset.test_loader)}]")
+
+        acc = correct / float(n)
+        avg_loss = total_loss / len(dataset.test_loader)
+        print(f"Evaluation - Accuracy: {100*acc:.2f}%, Avg Loss: {avg_loss:.4f}")
+    return acc
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data-location",
+        type=str,
+        default=str(Path.home() / "data"),
+        help="The root directory for the datasets.",
+    )
+    parser.add_argument(
+        "--model-location",
+        type=str,
+        default=str(Path.home() / "ssd" / "checkpoints" / "soups"),
+        help="Where to download the models.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=512,
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_arguments()
+    main(args)
