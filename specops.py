@@ -104,14 +104,13 @@ def main(args):
 
             epoch_loss += loss.item()
 
-            if i % 10 == 0:
-                print(f"Epoch {epoch}, {i}/{num_batches}, Loss: {loss.item():.4f}")
-                wandb.log(
-                    {
-                        "train/loss": loss.item(),
-                        "train/step": epoch * len(train_dataset.train_loader) + i,
-                    }
-                )
+            print(f"Epoch {epoch}, {i}/{num_batches}, Loss: {loss.item():.4f}")
+            wandb.log(
+                {
+                    "train/loss": loss.item(),
+                    "train/step": epoch * len(train_dataset.train_loader) + i,
+                }
+            )
 
         accuracy = test_model_on_dataset(alpha_model, test_dataset)
         print(f"Epoch {epoch} Accuracy: {100*accuracy:.2f}%")
