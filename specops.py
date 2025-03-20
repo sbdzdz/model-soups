@@ -44,13 +44,12 @@ class LearnedMerge(torch.nn.Module):
 
 
 def main(args):
-    # Initialize wandb
     wandb.init(
         project="model-soups",
         config={
             "num_models": num_models,
             "batch_size": args.batch_size,
-            "learning_rate": 0.05,
+            "learning_rate": args.learning_rate,
             "weight_decay": 0.0,
             "epochs": 5,
         },
@@ -84,7 +83,9 @@ def main(args):
     alpha_model = LearnedMerge(model, checkpoints)
 
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(alpha_model.parameters(), lr=0.05, weight_decay=0.0)
+    optimizer = torch.optim.AdamW(
+        alpha_model.parameters(), lr=args.learning_rate, weight_decay=0.0
+    )
     epochs = 5
 
     for epoch in range(epochs):
@@ -169,6 +170,12 @@ def parse_arguments():
         "--batch-size",
         type=int,
         default=256,
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=0.005,
+        help="Learning rate for the optimizer",
     )
     parser.add_argument(
         "--wandb-project",
