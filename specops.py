@@ -1,301 +1,204 @@
 import argparse
 import os
+import wget
+import torch
 import clip
-import json
-from pathlib import Path
-from tabulate import tabulate
-from tqdm import tqdm
-import numpy as np
-from typing import List
-import matplotlib.pyplot as plt
-
-from datasets import (
-    ImageNet2p,
-    ImageNet,
-    ImageNetV2,
-    ImageNetSketch,
-    ImageNetR,
-    ObjectNet,
-    ImageNetA,
-)
-from utils import test_model_on_dataset
-from merge import merge
-
-ALL_DATASETS = [
-    "ImageNet2p",
-    "ImageNet",
-    "ImageNetV2",
-    "ImageNetSketch",
-    "ImageNetR",
-    "ObjectNet",
-    "ImageNetA",
-]
-
-OOD_DATASETS = [
-    "ImageNetV2",
-    "ImageNetSketch",
-    "ImageNetR",
-    "ObjectNet",
-    "ImageNetA",
-]
+import time
+import torch.nn.utils.stateless as stateless
+from torch.utils.data import DataLoader
+from datasets.imagenet import ImageNet2pShuffled, ImageNet
+from utils import ModelWrapper, maybe_dictionarize_batch
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Merge models and evaluate performance"
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--data-location",
+        type=str,
+        default=os.path.expanduser("~/data"),
+        help="The root directory for the datasets.",
     )
     parser.add_argument(
         "--model-location",
         type=str,
-        default=os.path.join(os.environ.get("WORK", "."), "models"),
-        help="Directory containing model checkpoints",
+        default=os.path.expanduser("~/ssd/checkpoints/soups"),
+        help="Where to download the models.",
     )
     parser.add_argument(
-        "--dataset-location",
-        type=str,
-        default=os.path.join(os.environ.get("WORK", "."), "datasets"),
-        help="Root directory for datasets",
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["ImageNet2p"],
-        choices=ALL_DATASETS + ["all"],
-        help="Datasets to evaluate on",
+        "--download-models",
+        action="store_true",
+        default=False,
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1024,
-        help="Batch size for evaluation",
+        default=256,
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=8,
-        help="Number of worker threads for data loading",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="quick_eval_results.json",
-        help="Output file for results",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        default=False,
-        help="Whether to overwrite existing results",
     )
     return parser.parse_args()
 
 
-def get_dataset_class(dataset_name):
-    dataset_map = {
-        "ImageNet2p": ImageNet2p,
-        "ImageNet": ImageNet,
-        "ImageNetV2": ImageNetV2,
-        "ImageNetSketch": ImageNetSketch,
-        "ImageNetR": ImageNetR,
-        "ObjectNet": ObjectNet,
-        "ImageNetA": ImageNetA,
-    }
-    return dataset_map.get(dataset_name)
+class ModernAlphaWrapper(torch.nn.Module):
+    def __init__(self, model, parameter_lists):
+        super().__init__()
+        self.model = model
+        self.parameter_lists = parameter_lists
+
+        # Initialize mixing weights
+        num_params = len(parameter_lists[0])
+        num_models = len(parameter_lists)
+        ralpha = torch.ones(num_params, num_models)
+        ralpha = torch.nn.functional.softmax(ralpha, dim=1)
+        self.alpha_raw = torch.nn.Parameter(ralpha)
+        self.beta = torch.nn.Parameter(torch.tensor(1.0))
+
+    def alpha(self):
+        return torch.nn.functional.softmax(self.alpha_raw, dim=1)
+
+    def forward(self, x):
+        alpha_weights = self.alpha()
+
+        combined_params = {}
+        for idx, param_name in enumerate(self.parameter_lists[0].keys()):
+            stacked_params = torch.stack(
+                [params[param_name] for params in self.parameter_lists], dim=-1
+            )
+
+            weights = alpha_weights[idx]
+            combined_params[param_name] = (stacked_params @ weights).squeeze()
+
+        output = stateless.functional_call(self.model, combined_params, (x,))
+
+        return self.beta * output
+
+
+def evaluate_model(model, test_dset, criterion, device):
+    model.eval()
+    with torch.no_grad():
+        correct = 0.0
+        n = 0
+        total_loss = 0.0
+
+        for i, batch in enumerate(test_dset.test_loader):
+            batch = maybe_dictionarize_batch(batch)
+            inputs, labels = batch["images"].to(device), batch["labels"].to(device)
+
+            logits = model(inputs)
+            loss = criterion(logits, labels)
+            total_loss += loss.item()
+
+            pred = logits.argmax(dim=1, keepdim=True)
+            correct += pred.eq(labels.view_as(pred)).sum().item()
+            n += labels.size(0)
+
+            if i % 10 == 0:
+                print(f"Eval Progress: [{i}/{len(test_dset.test_loader)}]")
+
+        acc = correct / float(n)
+        avg_loss = total_loss / len(test_dset.test_loader)
+        print(f"Evaluation - Accuracy: {100*acc:.2f}%, Avg Loss: {avg_loss:.4f}")
+    return acc
 
 
 def main():
     args = parse_arguments()
+    NUM_MODELS = 72
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("Loading base CLIP model...")
-    base_model, preprocess = clip.load("ViT-B/32", "cpu", jit=False)
-
-    model_dir = Path(args.model_location)
-    model_paths = [str(model_dir / f"model_{i}.pt") for i in range(72)]
-
-    datasets_to_eval = []
-    if "all" in args.datasets:
-        datasets_to_eval = ALL_DATASETS
-    else:
-        datasets_to_eval = args.datasets
-
-    results = {}
-    if os.path.exists(args.output) and not args.overwrite:
-        with open(args.output, "r") as f:
-            results = json.load(f)
-
-    model = merge(model_paths, base_model)
-    for dataset_name in datasets_to_eval:
-        if dataset_name in results[config_name] and not args.overwrite:
-            print(f"Skipping {dataset_name} for {config_name} - already evaluated")
-            continue
-
-        print(f"Evaluating on {dataset_name}...")
-        dataset_cls = get_dataset_class(dataset_name)
-        dataset = dataset_cls(
-            preprocess, args.dataset_location, args.batch_size, args.workers
-        )
-        accuracy = test_model_on_dataset(model, dataset)
-        results[config_name][dataset_name] = accuracy
-        print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
-
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2)
-
-    print("\n=== FINAL RESULTS ===")
-    table_data = []
-    headers = ["Configuration"] + datasets_to_eval
-
-    for config_name, config_results in results.items():
-        row = [config_name]
-        for dataset in datasets_to_eval:
-            if dataset in config_results:
-                row.append(f"{config_results[dataset] * 100:.2f}%")
-            else:
-                row.append("N/A")
-        table_data.append(row)
-
-    if "ImageNet2p" in datasets_to_eval:
-        idx = datasets_to_eval.index("ImageNet2p") + 1
-        table_data.sort(
-            key=lambda x: float(x[idx].rstrip("%")) if x[idx] != "N/A" else 0,
-            reverse=True,
-        )
-
-    print(tabulate(table_data, headers=headers, tablefmt="grid"))
-    print(f"\nResults saved to {args.output}")
-
-    if set(datasets_to_eval) == set(ALL_DATASETS):
-        create_scatter_plot(results)
-
-
-def create_scatter_plot(results):
-
-    plt.figure(figsize=(12, 8))
-    ax = plt.gca()
-
-    value_colors = {
-        "random": "C1",
-        "mean": "C0",
-        "median": "pink",
-        "max": "purple",
-    }
-    markers = {False: "o", True: "^"}
-
-    for config_results in results.values():
-        config = config_results["config"]
-        value = config["value"]
-        elect_sign = config["elect_sign"]
-        use_base = config["use_base"]
-        alpha = config["alpha"]
-        variant = config["variant"]
-
-        ood_accs = [
-            config_results[dataset]
-            for dataset in OOD_DATASETS
-            if dataset in config_results
-        ]
-        ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
-
-        imagenet_acc = config_results.get("ImageNet", 0)
-
-        label_parts = [value.capitalize()]
-        if elect_sign:
-            label_parts.append("elect sign")
-        if use_base and alpha is not None:
-            label_parts.append(f"alpha={alpha:.1f}")
-        if variant:
-            label_parts.append(variant)
-
-        label = " ".join(
-            [
-                label_parts[0],
-                f"({', '.join(label_parts[1:])})" if len(label_parts) > 1 else "",
-            ]
-        ).strip()
-
-        if use_base:
-            color_alpha = 0.4 + (0.5 * alpha) if alpha is not None else 0.65
-            ax.scatter(
-                imagenet_acc,
-                ood_acc,
-                marker=markers[elect_sign],
-                color=value_colors.get(value, "gray"),
-                s=200,
-                label=label,
-                alpha=color_alpha,
-                zorder=5,
-                linewidth=0,
-            )
-        else:
-            ax.scatter(
-                imagenet_acc,
-                ood_acc,
-                marker=markers[elect_sign],
-                edgecolors=value_colors.get(value, "gray"),
-                facecolors="none",
-                s=200,
-                label=label,
-                linewidth=2,
-                zorder=5,
+    # Download models if needed
+    if args.download_models:
+        if not os.path.exists(args.model_location):
+            os.makedirs(args.model_location)
+        for i in range(NUM_MODELS):
+            print(f"\nDownloading model {i} of {NUM_MODELS - 1}")
+            wget.download(
+                f"https://github.com/mlfoundations/model-soups/releases/download/v0.0.2/model_{i}.pt",
+                out=args.model_location,
             )
 
-    # Add greedy soup results
-    with open("greedy_soup_results.jsonl", "r") as f:
-        greedy_soup_data = json.loads(f.readline())
-
-    ood_accs = [
-        greedy_soup_data[dataset]
-        for dataset in OOD_DATASETS
-        if dataset in greedy_soup_data
-    ]
-    greedy_ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
-
-    ax.scatter(
-        greedy_soup_data.get("ImageNet", 0.0),
-        greedy_ood_acc,
-        marker="*",
-        color="C4",
-        s=400,
-        label="Greedy Soup",
-        zorder=10,
+    # Load base model and datasets
+    base_model, preprocess = clip.load("ViT-B/32", device="cpu", jit=False)
+    train_dset = ImageNet2pShuffled(
+        preprocess,
+        location=args.data_location,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+    )
+    test_dset = ImageNet(
+        preprocess,
+        location=args.data_location,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
     )
 
-    # Add base model results
-    with open("individual_model_results.jsonl", "r") as f:
-        base_model_data = json.loads(f.readline())
-
-    base_ood_accs = [
-        base_model_data[dataset]
-        for dataset in OOD_DATASETS
-        if dataset in base_model_data
+    # Load model checkpoints
+    model_paths = [
+        os.path.join(args.model_location, f"model_{i}.pt") for i in range(NUM_MODELS)
     ]
-    base_ood_acc = sum(base_ood_accs) / len(base_ood_accs) if base_ood_accs else 0
+    parameter_lists = [torch.load(cp, map_location="cpu") for cp in model_paths]
 
-    ax.scatter(
-        base_model_data.get("ImageNet", 0.0),
-        base_ood_acc,
-        marker="h",
-        color="slategray",
-        s=150,
-        label="Initialization (LP)",
-        zorder=10,
+    # Setup model
+    feature_dim = parameter_lists[0]["classification_head.weight"].shape[1]
+    num_classes = parameter_lists[0]["classification_head.weight"].shape[0]
+    model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
+    alpha_model = ModernAlphaWrapper(model, parameter_lists).to(device)
+
+    # Training setup
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(alpha_model.parameters(), lr=0.05, weight_decay=0.0)
+    epochs = 5
+
+    # Training loop
+    for epoch in range(epochs):
+        alpha_model.train()
+        epoch_loss = 0.0
+        start_time = time.time()
+
+        for i, batch in enumerate(train_dset.train_loader):
+            batch = maybe_dictionarize_batch(batch)
+            inputs, labels = batch["images"].to(device), batch["labels"].to(device)
+
+            optimizer.zero_grad()
+            outputs = alpha_model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+            if i % 10 == 0:
+                percent_complete = 100.0 * i / len(train_dset.train_loader)
+                print(
+                    f"Epoch: {epoch} [{percent_complete:.0f}% {i}/{len(train_dset.train_loader)}] "
+                    f"Loss: {loss.item():.4f} Time: {time.time()-start_time:.2f}s"
+                )
+                start_time = time.time()
+
+        # Evaluate after each epoch
+        print(f"\nEvaluating epoch {epoch}")
+        acc = evaluate_model(alpha_model, test_dset, criterion, device)
+
+        # Optional: save checkpoints
+        # torch.save({
+        #     'epoch': epoch,
+        #     'model_state_dict': alpha_model.state_dict(),
+        #     'optimizer_state_dict': optimizer.state_dict(),
+        #     'accuracy': acc,
+        # }, f'checkpoint_epoch_{epoch}.pt')
+
+    # Final evaluation
+    print("\nFinal Evaluation:")
+    final_acc = evaluate_model(alpha_model, test_dset, criterion, device)
+    print(f"Final Accuracy: {100*final_acc:.2f}%")
+
+    # Save final weights
+    torch.save(
+        {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, f"alphas_final.pt"
     )
-
-    # Set labels and grid
-    ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
-    ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
-    ax.grid(True)
-
-    # Add legend with unique entries
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax.legend(
-        by_label.values(), by_label.keys(), fontsize=13, ncol=2, facecolor="white"
-    ).set_zorder(100)
-
-    plt.savefig("merge_comparison_plot.png", bbox_inches="tight")
-    plt.close()
-    print("Scatter plot saved as merge_comparison_plot.png")
 
 
 if __name__ == "__main__":
