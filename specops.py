@@ -15,6 +15,9 @@ import wandb
 
 class LearnedMerge(torch.nn.Module):
     def __init__(self, model, checkpoints):
+        """
+        An interpolation merge with learnable weights (one weight per layer per model).
+        """
         super().__init__()
         self.model = model
         self.checkpoints = checkpoints
@@ -38,6 +41,40 @@ class LearnedMerge(torch.nn.Module):
             combined_params[param_name] = (
                 (stacked_params @ weights).squeeze().to(x.device)
             )
+
+        output = func.functional_call(self.model, combined_params, (x,))
+
+        return self.beta * output
+
+
+class LearnedMergeSimple(torch.nn.Module):
+    def __init__(self, model, checkpoints):
+        """
+        An interpolation merge with learnable weights (one weight per model).
+        """
+        super().__init__()
+        self.model = model
+        self.checkpoints = checkpoints
+        num_models = len(checkpoints)
+        alpha = torch.nn.functional.softmax(torch.ones(num_models), dim=0)
+        self._alpha = torch.nn.Parameter(alpha)
+        self.beta = torch.nn.Parameter(torch.tensor(1.0))
+
+    @property
+    def alpha(self):
+        return torch.nn.functional.softmax(self._alpha, dim=0)
+
+    def forward(self, x):
+        combined_params = {}
+        weights = self.alpha.cpu()
+
+        for param_name in self.checkpoints[0].keys():
+            stacked_params = torch.stack(
+                [params[param_name] for params in self.checkpoints], dim=0
+            )
+            combined_params[param_name] = torch.sum(
+                stacked_params * weights.unsqueeze(-1).unsqueeze(-1), dim=0
+            ).to(x.device)
 
         output = func.functional_call(self.model, combined_params, (x,))
 
@@ -81,28 +118,19 @@ def main(args):
     feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
     num_classes = checkpoints[0]["classification_head.weight"].shape[0]
     model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
-    alpha_model = LearnedMerge(model, checkpoints)
+
+    for param in model.parameters():
+        param.requires_grad = False
+
+    if args.weighting == "layer":
+        alpha_model = LearnedMerge(model, checkpoints)
+        print("Using per-layer weighting (LearnedMerge)")
+    else:
+        alpha_model = LearnedMergeSimple(model, checkpoints)
+        print("Using per-model weighting (LearnedMergeSimple)")
 
     criterion = torch.nn.CrossEntropyLoss()
-    if args.optimizer == "adam":
-        if args.learning_rate is None:
-            args.learning_rate = 0.001
-        optimizer = torch.optim.AdamW(
-            alpha_model.parameters(),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-        )
-    elif args.optimizer == "lbfgs":
-        if args.learning_rate is None:
-            args.learning_rate = 1.0
-        optimizer = torch.optim.LBFGS(
-            alpha_model.parameters(),
-            lr=args.learning_rate,
-            max_iter=20,
-            history_size=100,
-        )
-    else:
-        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+    optimizer = create_optimizer(alpha_model, args)
 
     for epoch in range(args.epochs):
         alpha_model.train()
@@ -115,35 +143,12 @@ def main(args):
             outputs = alpha_model(inputs)
             loss = criterion(outputs, labels)
 
-            if args.optimizer == "adam":
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                # torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), max_norm=1.0)
-
-            elif args.optimizer == "lbfgs":
-
-                def closure():
-                    optimizer.zero_grad()
-                    outputs = alpha_model(inputs)
-                    loss = criterion(outputs, labels)
-                    loss.backward()
-                    return loss
-
-                optimizer.step(closure)
-
-                if not alpha_model._alpha.grad:
-                    loss.backward()
-
-            alpha_grad_norm = torch.norm(alpha_model._alpha.grad).item()
-            beta_grad_norm = torch.abs(alpha_model.beta.grad).item()
-            wandb.log(
-                {
-                    "gradients/alpha_norm": alpha_grad_norm,
-                    "gradients/beta_norm": beta_grad_norm,
-                }
-            )
+            log_gradient_norms(alpha_model)
+            log_alpha_values(alpha_model, args)
 
             epoch_loss += loss.item()
 
@@ -184,6 +189,73 @@ def main(args):
     )
 
     wandb.finish()
+
+
+def create_optimizer(alpha_model, args):
+    """
+    Create the appropriate optimizer based on command line arguments.
+
+    Returns:
+        torch.optim.Optimizer: The initialized optimizer
+    """
+    if args.optimizer == "adam":
+        if args.learning_rate is None:
+            args.learning_rate = 0.001
+        return torch.optim.AdamW(
+            alpha_model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "lbfgs":
+        if args.learning_rate is None:
+            args.learning_rate = 1.0
+        return torch.optim.LBFGS(
+            alpha_model.parameters(),
+            lr=args.learning_rate,
+            max_iter=20,
+            history_size=100,
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
+
+
+def log_alpha_values(alpha_model, args):
+    """
+    Log alpha values (or average alpha values) for each model to wandb.
+    """
+    if args.weighting == "layer":
+        alpha_distributions = alpha_model.alpha
+        avg_alpha_per_model = (
+            torch.mean(alpha_distributions, dim=0).detach().cpu().numpy()
+        )
+
+        alpha_dict = {
+            f"alpha_over_time/model_{i}": avg_alpha_per_model[i]
+            for i in range(len(avg_alpha_per_model))
+        }
+    else:
+        alpha_values = alpha_model.alpha.detach().cpu().numpy()
+
+        alpha_dict = {
+            f"alpha_over_time/model_{i}": alpha_values[i]
+            for i in range(len(alpha_values))
+        }
+
+    wandb.log(alpha_dict)
+
+
+def log_gradient_norms(alpha_model):
+    """
+    Log the gradient norms of alpha and beta parameters to wandb.
+    """
+    alpha_grad_norm = torch.norm(alpha_model._alpha.grad).item()
+    beta_grad_norm = torch.abs(alpha_model.beta.grad).item()
+    wandb.log(
+        {
+            "gradients/alpha_norm": alpha_grad_norm,
+            "gradients/beta_norm": beta_grad_norm,
+        }
+    )
 
 
 def parse_arguments():
@@ -234,6 +306,13 @@ def parse_arguments():
         type=str,
         default="adam",
         help="Optimizer to use",
+    )
+    parser.add_argument(
+        "--weighting",
+        type=str,
+        choices=["layer", "model"],
+        default="model",
+        help="Weighting scheme: 'layer' uses per-layer weights (LearnedMerge), 'model' uses per-model weights (LearnedMergeSimple)",
     )
     return parser.parse_args()
 
