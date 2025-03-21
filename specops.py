@@ -84,9 +84,25 @@ def main(args):
     alpha_model = LearnedMerge(model, checkpoints)
 
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.AdamW(
-        alpha_model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
-    )
+    if args.optimizer == "adam":
+        if args.learning_rate is None:
+            args.learning_rate = 0.001
+        optimizer = torch.optim.AdamW(
+            alpha_model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay,
+        )
+    elif args.optimizer == "lbfgs":
+        if args.learning_rate is None:
+            args.learning_rate = 1.0
+        optimizer = torch.optim.LBFGS(
+            alpha_model.parameters(),
+            lr=args.learning_rate,
+            max_iter=20,
+            history_size=100,
+        )
+    else:
+        raise ValueError(f"Unsupported optimizer: {args.optimizer}")
 
     for epoch in range(args.epochs):
         alpha_model.train()
@@ -117,7 +133,6 @@ def main(args):
 
                 optimizer.step(closure)
 
-                # Recompute gradients for logging if needed
                 if not alpha_model._alpha.grad:
                     loss.backward()
 
@@ -159,6 +174,11 @@ def main(args):
         }
     )
 
+    test_acc = test_model_on_dataset(alpha_model, test_dataset, criterion)
+    print(f"Test Accuracy: {test_acc:.2f}%")
+
+    wandb.log({"test/accuracy": test_acc})
+
     torch.save(
         {"alpha": alpha_model.alpha, "beta": alpha_model.beta}, "alphas_final.pt"
     )
@@ -188,8 +208,8 @@ def parse_arguments():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=0.001,
-        help="Learning rate for the optimizer",
+        default=None,  # Will be set based on optimizer type
+        help="Learning rate for the optimizer (if None, uses PyTorch defaults: 0.001 for Adam, 1.0 for LBFGS)",
     )
     parser.add_argument(
         "--weight-decay",
