@@ -96,14 +96,39 @@ def main(args):
             batch = maybe_dictionarize_batch(batch)
             inputs, labels = batch["images"].to(device), batch["labels"].to(device)
 
-            optimizer.zero_grad()
             outputs = alpha_model(inputs)
             loss = criterion(outputs, labels)
-            loss.backward()
 
-            torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), max_norm=1.0)
+            if args.optimizer == "adam":
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-            optimizer.step()
+                # torch.nn.utils.clip_grad_norm_(alpha_model.parameters(), max_norm=1.0)
+
+            elif args.optimizer == "lbfgs":
+
+                def closure():
+                    optimizer.zero_grad()
+                    outputs = alpha_model(inputs)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    return loss
+
+                optimizer.step(closure)
+
+                # Recompute gradients for logging if needed
+                if not alpha_model._alpha.grad:
+                    loss.backward()
+
+            alpha_grad_norm = torch.norm(alpha_model._alpha.grad).item()
+            beta_grad_norm = torch.abs(alpha_model.beta.grad).item()
+            wandb.log(
+                {
+                    "gradients/alpha_norm": alpha_grad_norm,
+                    "gradients/beta_norm": beta_grad_norm,
+                }
+            )
 
             epoch_loss += loss.item()
 
@@ -118,7 +143,7 @@ def main(args):
         epoch_loss = epoch_loss / len(train_dataset.train_loader)
         print(f"Epoch {epoch} Average Loss: {epoch_loss:.4f}")
 
-    alpha_distributions = alpha_model.alpha()
+    alpha_distributions = alpha_model.alpha
     for idx, param_name in enumerate(alpha_model.checkpoints[0].keys()):
         wandb.log(
             {
@@ -135,7 +160,7 @@ def main(args):
     )
 
     torch.save(
-        {"alpha": alpha_model.alpha(), "beta": alpha_model.beta}, "alphas_final.pt"
+        {"alpha": alpha_model.alpha, "beta": alpha_model.beta}, "alphas_final.pt"
     )
 
     wandb.finish()
@@ -183,6 +208,12 @@ def parse_arguments():
         type=str,
         default="model-soups",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adam",
+        help="Optimizer to use",
     )
     return parser.parse_args()
 
