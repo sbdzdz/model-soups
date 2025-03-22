@@ -82,10 +82,76 @@ class WeightedMergeModel(torch.nn.Module):
         return func.functional_call(self.model, combined_params, (x,))
 
 
+class WeightedMergeSpectrum(torch.nn.Module):
+    def __init__(self, model, checkpoints, num_singular_values):
+        """
+        A merge that modifies the spectrum of parameter matrices by scaling
+        the top singular values with learnable parameters.
+
+        Args:
+            model: The base model
+            checkpoints: List of model checkpoints
+            num_singular_values: Number of top singular values to modify
+        """
+        super().__init__()
+        self.model = model
+        self.checkpoints = checkpoints
+        self.num_singular_values = num_singular_values
+        num_params = len(checkpoints[0])
+
+        self.alpha = torch.nn.Parameter(torch.ones(num_params, num_singular_values))
+
+        self.svd_components = {}
+        for param_name in self.checkpoints[0].keys():
+            stacked_params = torch.stack(
+                [params[param_name] for params in self.checkpoints], dim=0
+            )
+            avg_param = torch.mean(stacked_params, dim=0)
+
+            if len(avg_param.shape) < 2 or min(avg_param.shape) < num_singular_values:
+                self.svd_components[param_name] = None
+                continue
+
+            original_shape = avg_param.shape
+            U, S, Vh = torch.linalg.svd(avg_param, full_matrices=False)
+            self.svd_components[param_name] = {
+                "U": U,
+                "S": S,
+                "Vh": Vh,
+                "original_shape": original_shape,
+            }
+
+    def forward(self, x):
+        combined_params = {}
+
+        for idx, param_name in enumerate(self.checkpoints[0].keys()):
+            if self.svd_components[param_name] is None:
+                stacked_params = torch.stack(
+                    [params[param_name] for params in self.checkpoints], dim=0
+                )
+                combined_params[param_name] = torch.mean(stacked_params, dim=0).to(
+                    x.device
+                )
+                continue
+
+            components = self.svd_components[param_name]
+            U, S, Vh = components["U"], components["S"], components["Vh"]
+
+            S_modified = S.clone()
+            top_k = min(self.num_singular_values, len(S))
+            S_modified[:top_k] = S[:top_k] * self.alpha[idx, :top_k].cpu()
+
+            reconstructed = torch.matmul(U * S_modified.unsqueeze(0), Vh)
+            combined_params[param_name] = reconstructed.to(x.device)
+
+        return func.functional_call(self.model, combined_params, (x,))
+
+
 def main(args):
     wandb.init(
         entity="codis",
         project="specops",
+        mode=args.wandb_mode,
         config={
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
@@ -134,6 +200,10 @@ def main(args):
 
     if args.weighting == "layer":
         alpha_model = WeightedMergeLayer(model, checkpoints)
+    elif args.weighting == "spectrum":
+        alpha_model = WeightedMergeSpectrum(
+            model, checkpoints, num_singular_values=args.num_singular_values
+        )
     else:
         alpha_model = WeightedMergeModel(model, checkpoints)
 
@@ -251,7 +321,7 @@ def log_gradient_norms(alpha_model):
     """
     Log the gradient norms of alpha and beta parameters to wandb.
     """
-    alpha_grad_norm = torch.norm(alpha_model._alpha.grad).item()
+    alpha_grad_norm = torch.norm(alpha_model.alpha.grad).item()
     wandb.log(
         {
             "gradients/alpha_norm": alpha_grad_norm,
@@ -297,12 +367,6 @@ def parse_arguments():
         help="Number of training epochs",
     )
     parser.add_argument(
-        "--wandb-project",
-        type=str,
-        default="model-soups",
-        help="Weights & Biases project name",
-    )
-    parser.add_argument(
         "--optimizer",
         type=str,
         default="adam",
@@ -311,15 +375,35 @@ def parse_arguments():
     parser.add_argument(
         "--weighting",
         type=str,
-        choices=["layer", "model"],
+        choices=["layer", "model", "spectrum"],
         default="model",
         help="Weighting scheme: 'layer' uses per-layer weights (WeightedMergeLayer), "
-        "'model' uses per-model weights (WeightedMergeModel)",
+        "'model' uses per-model weights (WeightedMergeModel), "
+        "'spectrum' scales top singular values (WeightedMergeSpectrum)",
     )
     parser.add_argument(
         "--eval-every-epoch",
         action="store_true",
         help="Evaluate accuracy on training set after every epoch",
+    )
+    parser.add_argument(
+        "--num-singular-values",
+        type=int,
+        default=100,
+        help="Number of top singular values to modify in spectrum weighting",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        type=str,
+        choices=["online", "offline", "disabled"],
+        default="online",
+        help="Weights & Biases logging mode",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default="model-soups",
+        help="Weights & Biases project name",
     )
     return parser.parse_args()
 
