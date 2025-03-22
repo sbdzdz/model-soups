@@ -13,7 +13,7 @@ import multiprocessing
 import wandb
 
 
-class LearnedMerge(torch.nn.Module):
+class WeightedMergeLayer(torch.nn.Module):
     def __init__(self, model, checkpoints):
         """
         An interpolation merge with learnable weights (one weight per layer per model).
@@ -47,7 +47,7 @@ class LearnedMerge(torch.nn.Module):
         return self.beta * output
 
 
-class LearnedMergeSimple(torch.nn.Module):
+class WeightedMergeModel(torch.nn.Module):
     def __init__(self, model, checkpoints):
         """
         An interpolation merge with learnable weights (one weight per model).
@@ -72,8 +72,12 @@ class LearnedMergeSimple(torch.nn.Module):
             stacked_params = torch.stack(
                 [params[param_name] for params in self.checkpoints], dim=0
             )
+
+            weight_shape = [weights.shape[0]] + [1] * (stacked_params.dim() - 1)
+            broadcast_weights = weights.view(*weight_shape)
+
             combined_params[param_name] = torch.sum(
-                stacked_params * weights.unsqueeze(-1).unsqueeze(-1), dim=0
+                stacked_params * broadcast_weights, dim=0
             ).to(x.device)
 
         output = func.functional_call(self.model, combined_params, (x,))
@@ -123,11 +127,9 @@ def main(args):
         param.requires_grad = False
 
     if args.weighting == "layer":
-        alpha_model = LearnedMerge(model, checkpoints)
-        print("Using per-layer weighting (LearnedMerge)")
+        alpha_model = WeightedMergeLayer(model, checkpoints)
     else:
-        alpha_model = LearnedMergeSimple(model, checkpoints)
-        print("Using per-model weighting (LearnedMergeSimple)")
+        alpha_model = WeightedMergeModel(model, checkpoints)
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = create_optimizer(alpha_model, args)
@@ -163,30 +165,15 @@ def main(args):
         epoch_loss = epoch_loss / len(train_dataset.train_loader)
         print(f"Epoch {epoch} Average Loss: {epoch_loss:.4f}")
 
-    alpha_distributions = alpha_model.alpha
-    for idx, param_name in enumerate(alpha_model.checkpoints[0].keys()):
-        wandb.log(
-            {
-                f"alpha_distributions/{param_name}": wandb.Histogram(
-                    alpha_distributions[idx].detach().cpu().numpy()
-                ),
-            }
-        )
-
-    wandb.log(
-        {
-            "final/beta": alpha_model.beta.item(),
-        }
-    )
+        alpha_model.eval()
+        with torch.no_grad():
+            train_acc = test_model_on_dataset(alpha_model, train_dataset, criterion)
+            print(f"Epoch {epoch} Train Accuracy: {train_acc:.2f}%")
+            wandb.log({"train/accuracy": train_acc, "epoch": epoch})
 
     test_acc = test_model_on_dataset(alpha_model, test_dataset, criterion)
     print(f"Test Accuracy: {test_acc:.2f}%")
-
     wandb.log({"test/accuracy": test_acc})
-
-    torch.save(
-        {"alpha": alpha_model.alpha, "beta": alpha_model.beta}, "alphas_final.pt"
-    )
 
     wandb.finish()
 
@@ -280,7 +267,7 @@ def parse_arguments():
     parser.add_argument(
         "--learning-rate",
         type=float,
-        default=None,  # Will be set based on optimizer type
+        default=None,
         help="Learning rate for the optimizer (if None, uses PyTorch defaults: 0.001 for Adam, 1.0 for LBFGS)",
     )
     parser.add_argument(
@@ -312,7 +299,7 @@ def parse_arguments():
         type=str,
         choices=["layer", "model"],
         default="model",
-        help="Weighting scheme: 'layer' uses per-layer weights (LearnedMerge), 'model' uses per-model weights (LearnedMergeSimple)",
+        help="Weighting scheme: 'layer' uses per-layer weights (WeightedMergeLayer), 'model' uses per-model weights (WeightedMergeModel)",
     )
     return parser.parse_args()
 
