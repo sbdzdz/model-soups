@@ -58,7 +58,6 @@ class WeightedMergeModel(torch.nn.Module):
         num_models = len(checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_models), dim=0)
         self._alpha = torch.nn.Parameter(alpha)
-        self.beta = torch.nn.Parameter(torch.tensor(1.0))
 
     @property
     def alpha(self):
@@ -80,9 +79,7 @@ class WeightedMergeModel(torch.nn.Module):
                 stacked_params * broadcast_weights, dim=0
             ).to(x.device)
 
-        output = func.functional_call(self.model, combined_params, (x,))
-
-        return self.beta * output
+        return func.functional_call(self.model, combined_params, (x,))
 
 
 def main(args):
@@ -118,7 +115,16 @@ def main(args):
     )
 
     model_paths = [args.model_location / f"model_{i}.pt" for i in range(num_models)]
-    checkpoints = [torch.load(path, map_location="cpu") for path in model_paths]
+
+    raw_checkpoints = [torch.load(path, map_location="cpu") for path in model_paths]
+    checkpoints = [
+        {
+            k: v.requires_grad_(False) if isinstance(v, torch.Tensor) else v
+            for k, v in checkpoint.items()
+        }
+        for checkpoint in raw_checkpoints
+    ]
+
     feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
     num_classes = checkpoints[0]["classification_head.weight"].shape[0]
     model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
@@ -142,12 +148,19 @@ def main(args):
             batch = maybe_dictionarize_batch(batch)
             inputs, labels = batch["images"].to(device), batch["labels"].to(device)
 
-            outputs = alpha_model(inputs)
-            loss = criterion(outputs, labels)
+            def closure():
+                optimizer.zero_grad()
+                outputs = alpha_model(inputs)
+                loss = criterion(outputs, labels)
+                loss.backward()
+                return loss
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if args.optimizer == "adam":
+                loss = closure()
+                optimizer.step()
+
+            elif args.optimizer == "lbfgs":
+                loss = optimizer.step(closure)
 
             log_gradient_norms(alpha_model)
             log_alpha_values(alpha_model, args)
@@ -165,13 +178,16 @@ def main(args):
         epoch_loss = epoch_loss / len(train_dataset.train_loader)
         print(f"Epoch {epoch} Average Loss: {epoch_loss:.4f}")
 
-        alpha_model.eval()
-        with torch.no_grad():
-            train_acc = test_model_on_dataset(alpha_model, train_dataset, criterion)
-            print(f"Epoch {epoch} Train Accuracy: {train_acc:.2f}%")
-            wandb.log({"train/accuracy": train_acc, "epoch": epoch})
+        wandb.log({"train/epoch_loss": epoch_loss, "epoch": epoch})
 
-    test_acc = test_model_on_dataset(alpha_model, test_dataset, criterion)
+        if args.eval_every_epoch:
+            alpha_model.eval()
+            with torch.no_grad():
+                train_acc = test_model_on_dataset(alpha_model, train_dataset)
+                print(f"Epoch {epoch} Train Accuracy: {train_acc:.2f}%")
+                wandb.log({"train/accuracy": train_acc, "epoch": epoch})
+
+    test_acc = test_model_on_dataset(alpha_model, test_dataset)
     print(f"Test Accuracy: {test_acc:.2f}%")
     wandb.log({"test/accuracy": test_acc})
 
@@ -236,11 +252,9 @@ def log_gradient_norms(alpha_model):
     Log the gradient norms of alpha and beta parameters to wandb.
     """
     alpha_grad_norm = torch.norm(alpha_model._alpha.grad).item()
-    beta_grad_norm = torch.abs(alpha_model.beta.grad).item()
     wandb.log(
         {
             "gradients/alpha_norm": alpha_grad_norm,
-            "gradients/beta_norm": beta_grad_norm,
         }
     )
 
@@ -299,7 +313,13 @@ def parse_arguments():
         type=str,
         choices=["layer", "model"],
         default="model",
-        help="Weighting scheme: 'layer' uses per-layer weights (WeightedMergeLayer), 'model' uses per-model weights (WeightedMergeModel)",
+        help="Weighting scheme: 'layer' uses per-layer weights (WeightedMergeLayer), "
+        "'model' uses per-model weights (WeightedMergeModel)",
+    )
+    parser.add_argument(
+        "--eval-every-epoch",
+        action="store_true",
+        help="Evaluate accuracy on training set after every epoch",
     )
     return parser.parse_args()
 
