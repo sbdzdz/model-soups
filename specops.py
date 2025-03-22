@@ -101,48 +101,44 @@ class WeightedMergeSpectrum(torch.nn.Module):
 
         self.alpha = torch.nn.Parameter(torch.ones(num_params, num_singular_values))
 
+        self.avg_params = {}
         self.svd_components = {}
+
         for param_name in self.checkpoints[0].keys():
             stacked_params = torch.stack(
                 [params[param_name] for params in self.checkpoints], dim=0
             )
             avg_param = torch.mean(stacked_params, dim=0)
+            self.avg_params[param_name] = avg_param
 
-            if len(avg_param.shape) < 2 or min(avg_param.shape) < num_singular_values:
+            if len(avg_param.shape) != 2 or "text_projection" in param_name:
                 self.svd_components[param_name] = None
                 continue
 
-            original_shape = avg_param.shape
             U, S, Vh = torch.linalg.svd(avg_param, full_matrices=False)
             self.svd_components[param_name] = {
                 "U": U,
                 "S": S,
                 "Vh": Vh,
-                "original_shape": original_shape,
             }
 
     def forward(self, x):
         combined_params = {}
 
         for idx, param_name in enumerate(self.checkpoints[0].keys()):
-            if self.svd_components[param_name] is None:
-                stacked_params = torch.stack(
-                    [params[param_name] for params in self.checkpoints], dim=0
-                )
-                combined_params[param_name] = torch.mean(stacked_params, dim=0).to(
-                    x.device
-                )
-                continue
+            combined_params[param_name] = self.avg_params[param_name].to(x.device)
 
-            components = self.svd_components[param_name]
-            U, S, Vh = components["U"], components["S"], components["Vh"]
+            if self.svd_components[param_name] is not None:
+                components = self.svd_components[param_name]
+                U, S, Vh = components["U"], components["S"], components["Vh"]
 
-            S_modified = S.clone()
-            top_k = min(self.num_singular_values, len(S))
-            S_modified[:top_k] = S[:top_k] * self.alpha[idx, :top_k].cpu()
+                S_modified = S.clone()
+                top_k = min(self.num_singular_values, len(S))
+                S_modified[:top_k] = S[:top_k] * self.alpha[idx, :top_k].cpu()
+                S_diag = torch.diag(S_modified)
 
-            reconstructed = torch.matmul(U * S_modified.unsqueeze(0), Vh)
-            combined_params[param_name] = reconstructed.to(x.device)
+                reconstructed = torch.linalg.multi_dot([U, S_diag, Vh])
+                combined_params[param_name] = reconstructed.to(x.device)
 
         return func.functional_call(self.model, combined_params, (x,))
 
