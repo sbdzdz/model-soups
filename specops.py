@@ -293,22 +293,13 @@ def create_optimizer(alpha_model, args):
 
 
 def log_alpha_values(alpha_model, args):
-    """
-    Log alpha values (or average alpha values) for each model to wandb.
-    """
-    if args.weighting == "layer":
-        alpha_distributions = alpha_model.alpha
-        avg_alpha_per_model = (
-            torch.mean(alpha_distributions, dim=0).detach().cpu().numpy()
-        )
-
+    alpha_values = alpha_model.alpha.detach().cpu().numpy()
+    if args.weighting == "layer" or args.weighting == "spectrum":
         alpha_dict = {
-            f"alpha_over_time/model_{i}": avg_alpha_per_model[i]
-            for i in range(len(avg_alpha_per_model))
+            f"alpha_distribution/layer_{i}": alpha_values[i]
+            for i in range(len(alpha_values))
         }
     else:
-        alpha_values = alpha_model.alpha.detach().cpu().numpy()
-
         alpha_dict = {
             f"alpha_over_time/model_{i}": alpha_values[i]
             for i in range(len(alpha_values))
