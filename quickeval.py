@@ -43,14 +43,14 @@ def parse_arguments():
     )
     parser.add_argument(
         "--model-location",
-        type=str,
-        default=os.path.join(os.environ.get("WORK", "."), "models"),
+        type=Path,
+        default=Path(os.environ.get("WORK", ".")) / "models",
         help="Directory containing model checkpoints",
     )
     parser.add_argument(
         "--dataset-location",
-        type=str,
-        default=os.path.join(os.environ.get("WORK", "."), "datasets"),
+        type=Path,
+        default=Path(os.environ.get("WORK", ".")) / "datasets",
         help="Root directory for datasets",
     )
     parser.add_argument(
@@ -73,7 +73,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--alphas-path",
-        type=str,
+        type=Path,
         required=True,
         help="Path to the saved alpha weights file (.pt)",
     )
@@ -83,6 +83,11 @@ def parse_arguments():
         choices=["spectrum", "model", "layer"],
         required=True,
         help="Weighting scheme used for model merging",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing results files",
     )
     return parser.parse_args()
 
@@ -103,11 +108,19 @@ def get_dataset_class(dataset_name):
 def main():
     args = parse_arguments()
 
+    output_file = Path(f"results/specops_{args.weighting}.jsonl")
+
+    if output_file.exists() and not args.overwrite:
+        print(f"Results file {output_file} already exists and --overwrite not set.")
+        print("Skipping evaluation and creating plot directly.")
+        create_comparison_plot(output_file)
+        return
+
     print("Loading base CLIP model...")
     base_model, preprocess = clip.load("ViT-B/32", "cpu", jit=False)
 
-    model_dir = Path(args.model_location)
-    model_paths = [str(model_dir / f"model_{i}.pt") for i in range(72)]
+    model_dir = args.model_location
+    model_paths = [model_dir / f"model_{i}.pt" for i in range(72)]
 
     print("Loading model checkpoints...")
     raw_checkpoints = [torch.load(path, map_location="cpu") for path in model_paths]
@@ -123,7 +136,6 @@ def main():
     if args.datasets == ["all"] or "all" in args.datasets:
         datasets_to_eval = ALL_DATASETS
     else:
-        # Verify that all provided dataset names are valid
         for dataset in args.datasets:
             if dataset not in ALL_DATASETS:
                 print(
@@ -165,115 +177,156 @@ def main():
             print(f"Evaluating on {dataset_name}...")
             dataset_cls = get_dataset_class(dataset_name)
             dataset = dataset_cls(
-                preprocess, args.dataset_location, args.batch_size, args.workers
+                preprocess, str(args.dataset_location), args.batch_size, args.workers
             )
             accuracy = test_model_on_dataset(weighted_model, dataset)
             results[dataset_name] = accuracy
             print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
 
-        output_file = f"specops_{args.weighting}_results.jsonl"
         with open(output_file, "w") as f:
             f.write(json.dumps(results) + "\n")
         print(f"Results saved to {output_file}")
-        create_comparison_plot(output_file)
+
+    create_comparison_plot(output_file)
 
 
 def create_comparison_plot(specops_results_file):
     """
-    Create a scatter plot comparing all models using results from jsonl files.
+    Create a scatter plot comparing all models using results from jsonl files,
+    matching the style from main.py.
 
     Args:
         specops_results_file: Path to the specops results jsonl file
     """
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 12))
     ax = plt.gca()
 
-    # Define colors and markers for different model types
-    model_styles = {
-        "specops_model": {
-            "color": "red",
-            "marker": "D",
-            "size": 300,
-            "label": "SpecOps (model)",
-        },
-        "specops_layer": {
-            "color": "green",
-            "marker": "D",
-            "size": 300,
-            "label": "SpecOps (layer)",
-        },
-        "specops_spectrum": {
-            "color": "blue",
-            "marker": "D",
-            "size": 300,
-            "label": "SpecOps (spectrum)",
-        },
-        "greedy_soup": {
-            "color": "C4",
-            "marker": "*",
-            "size": 400,
-            "label": "Greedy Soup",
-        },
-        "uniform_soup": {
-            "color": "orange",
-            "marker": "P",
-            "size": 300,
-            "label": "Uniform Soup",
-        },
-        "individual_models": {
-            "color": "slategray",
-            "marker": "h",
-            "size": 150,
-            "label": "Initialization (LP)",
-        },
+    result_files = {
+        "specops": specops_results_file,
+        "greedy_soup": Path("results/greedy_soup.jsonl"),
+        "uniform_soup": Path("results/uniform_soup.jsonl"),
+        "individual_model": Path("results/individual_model.jsonl"),
     }
 
-    result_files = [
-        specops_results_file,
-        "greedy_soup_results.jsonl",
-        "uniform_soup_results.jsonl",
-        "individual_model_results.jsonl",
-    ]
+    for path in result_files.values():
+        assert path.exists(), f"Results file {path} does not exist"
 
-    for file_path in result_files:
-        try:
-            with open(file_path, "r") as f:
-                results = json.loads(f.readline())
+    results_data = {}
 
-            model_name = results.get("model_name", Path(file_path).stem)
+    for model_type in ["specops", "greedy_soup", "uniform_soup"]:
+        file_path = result_files[model_type]
+        with open(file_path, "r") as f:
+            results_data[model_type] = json.loads(f.readline())
+            print(f"Loaded {model_type} results from {file_path}")
 
-            ood_accs = [
-                results[dataset] for dataset in OOD_DATASETS if dataset in results
-            ]
-            ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
-            imagenet_acc = results.get("ImageNet", 0)
+    for model_type in ["specops", "greedy_soup", "uniform_soup"]:
+        data = results_data[model_type]
+        if data:
+            ood_accs = [data[dataset] for dataset in OOD_DATASETS if dataset in data]
+            data["OOD"] = sum(ood_accs) / len(ood_accs) if ood_accs else 0
 
-            style = next(
-                (v for k, v in model_styles.items() if k in model_name),
-                {"color": "gray", "marker": "o", "size": 200, "label": model_name},
-            )
+    specops_data = results_data["specops"]
+    weighting = specops_data["model_name"].split("_")[1]
+    colors = {"model": "red", "layer": "green", "spectrum": "blue"}
+    ax.scatter(
+        specops_data["ImageNet"],
+        specops_data["OOD"],
+        marker="d",
+        color=colors.get(weighting, "magenta"),
+        s=200,
+        label=f"Spectrum parametrised",
+        zorder=10,
+    )
+    print(
+        f"Plotted SpecOps ({weighting}): ImageNet={specops_data['ImageNet']:.4f}, OOD={specops_data['OOD']:.4f}"
+    )
 
-            ax.scatter(
-                imagenet_acc,
-                ood_acc,
-                marker=style["marker"],
-                color=style["color"],
-                s=style["size"],
-                label=style["label"],
-                zorder=10,
-            )
+    # Plot Greedy Soup
+    greedy_data = results_data["greedy_soup"]
+    ax.scatter(
+        greedy_data["ImageNet"],
+        greedy_data["OOD"],
+        marker="*",
+        color="C4",
+        s=400,
+        label="Greedy Soup",
+        zorder=10,
+    )
+    print(
+        f"Plotted Greedy Soup: ImageNet={greedy_data['ImageNet']:.4f}, OOD={greedy_data['OOD']:.4f}"
+    )
 
-            print(
-                f"Plotted {model_name}: ImageNet={imagenet_acc:.4f}, Avg OOD={ood_acc:.4f}"
-            )
+    # Plot Uniform Soup
+    uniform_data = results_data["uniform_soup"]
+    ax.scatter(
+        uniform_data["ImageNet"],
+        uniform_data["OOD"],
+        marker="P",
+        color="C0",
+        s=300,
+        label="Uniform Soup",
+        zorder=10,
+    )
+    print(
+        f"Plotted Uniform Soup: ImageNet={uniform_data['ImageNet']:.4f}, OOD={uniform_data['OOD']:.4f}"
+    )
 
-        except FileNotFoundError:
-            print(f"Warning: Could not load {file_path}")
+    # Load individual models (multiple models in one file)
+    individual_models = []
+    with open(result_files["individual_model"], "r") as f:
+        for line in f:
+            if line.strip():
+                individual_models.append(json.loads(line))
 
+    print(f"Loaded {len(individual_models)} individual models")
+
+    # Calculate OOD averages for all individual models
+    for model in individual_models:
+        ood_accs = [model[dataset] for dataset in OOD_DATASETS if dataset in model]
+        model["OOD"] = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+
+    # Plot the first model (model_0) as initialization
+    if individual_models:
+        base_model = individual_models[0]  # model_0 is the first one
+        ax.scatter(
+            base_model["ImageNet"],
+            base_model["OOD"],
+            marker="h",
+            color="slategray",
+            s=150,
+            label="Initialization (LP)",
+            zorder=10,
+        )
+        print(
+            f"Plotted Initialization: ImageNet={base_model['ImageNet']:.4f}, OOD={base_model['OOD']:.4f}"
+        )
+
+    # Plot all other individual models
+    if len(individual_models) > 1:
+        other_models = individual_models[1:]  # All models except model_0
+
+        # Extract ImageNet and OOD accuracies
+        imagenet_accs = [model["ImageNet"] for model in other_models]
+        ood_accs = [model["OOD"] for model in other_models]
+
+        ax.scatter(
+            imagenet_accs,
+            ood_accs,
+            marker="d",
+            color="C2",  # Green color like in main.py
+            s=130,
+            label="Various checkpoints",
+            zorder=9,  # Slightly behind other points
+            alpha=0.7,  # Slight transparency to avoid overcrowding
+        )
+        print(f"Plotted {len(other_models)} additional individual checkpoints")
+
+    # Set labels and grid
     ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
     ax.grid(True)
 
+    # Add legend with unique entries
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(
