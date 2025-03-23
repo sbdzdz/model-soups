@@ -1,7 +1,7 @@
 #!/bin/bash
 
-learning_rates=(0.0001 0.0005 0.001 0.005 0.01 0.05)
-weight_decays=(0.0 0.1)
+learning_rates=(0.00001 0.0001 0.001 0.01)
+weight_decays=(0.0)
 
 log_file="submitted_jobs.txt"
 echo "Submitting jobs at $(date)" > $log_file
