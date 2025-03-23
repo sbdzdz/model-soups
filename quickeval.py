@@ -205,7 +205,6 @@ def create_comparison_plot(specops_results_file):
         "specops": specops_results_file,
         "greedy_soup": Path("results/greedy_soup.jsonl"),
         "uniform_soup": Path("results/uniform_soup.jsonl"),
-        "individual_model": Path("results/individual_model.jsonl"),
     }
 
     for path in result_files.values():
@@ -213,17 +212,14 @@ def create_comparison_plot(specops_results_file):
 
     results_data = {}
 
-    for model_type in ["specops", "greedy_soup", "uniform_soup"]:
-        file_path = result_files[model_type]
+    for model_type, file_path in result_files.items():
         with open(file_path, "r") as f:
             results_data[model_type] = json.loads(f.readline())
             print(f"Loaded {model_type} results from {file_path}")
 
-    for model_type in ["specops", "greedy_soup", "uniform_soup"]:
         data = results_data[model_type]
-        if data:
-            ood_accs = [data[dataset] for dataset in OOD_DATASETS if dataset in data]
-            data["OOD"] = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+        ood_accs = [data[dataset] for dataset in OOD_DATASETS]
+        data["OOD"] = sum(ood_accs) / len(ood_accs)
 
     specops_data = results_data["specops"]
     weighting = specops_data["model_name"].split("_")[1]
@@ -231,7 +227,7 @@ def create_comparison_plot(specops_results_file):
     ax.scatter(
         specops_data["ImageNet"],
         specops_data["OOD"],
-        marker="d",
+        marker="o",
         color=colors.get(weighting, "magenta"),
         s=200,
         label=f"Spectrum parametrised",
@@ -241,7 +237,6 @@ def create_comparison_plot(specops_results_file):
         f"Plotted SpecOps ({weighting}): ImageNet={specops_data['ImageNet']:.4f}, OOD={specops_data['OOD']:.4f}"
     )
 
-    # Plot Greedy Soup
     greedy_data = results_data["greedy_soup"]
     ax.scatter(
         greedy_data["ImageNet"],
@@ -256,7 +251,6 @@ def create_comparison_plot(specops_results_file):
         f"Plotted Greedy Soup: ImageNet={greedy_data['ImageNet']:.4f}, OOD={greedy_data['OOD']:.4f}"
     )
 
-    # Plot Uniform Soup
     uniform_data = results_data["uniform_soup"]
     ax.scatter(
         uniform_data["ImageNet"],
@@ -271,23 +265,21 @@ def create_comparison_plot(specops_results_file):
         f"Plotted Uniform Soup: ImageNet={uniform_data['ImageNet']:.4f}, OOD={uniform_data['OOD']:.4f}"
     )
 
-    # Load individual models (multiple models in one file)
     individual_models = []
-    with open(result_files["individual_model"], "r") as f:
+    path = Path("results/individual_model.jsonl")
+    with open(path, "r") as f:
         for line in f:
             if line.strip():
                 individual_models.append(json.loads(line))
 
     print(f"Loaded {len(individual_models)} individual models")
 
-    # Calculate OOD averages for all individual models
     for model in individual_models:
-        ood_accs = [model[dataset] for dataset in OOD_DATASETS if dataset in model]
-        model["OOD"] = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+        ood_accs = [model[dataset] for dataset in OOD_DATASETS]
+        model["OOD"] = sum(ood_accs) / len(ood_accs)
 
-    # Plot the first model (model_0) as initialization
     if individual_models:
-        base_model = individual_models[0]  # model_0 is the first one
+        base_model = individual_models[0]
         ax.scatter(
             base_model["ImageNet"],
             base_model["OOD"],
@@ -301,32 +293,26 @@ def create_comparison_plot(specops_results_file):
             f"Plotted Initialization: ImageNet={base_model['ImageNet']:.4f}, OOD={base_model['OOD']:.4f}"
         )
 
-    # Plot all other individual models
-    if len(individual_models) > 1:
-        other_models = individual_models[1:]  # All models except model_0
+    other_models = individual_models[1:]
+    imagenet_accs = [model["ImageNet"] for model in other_models]
+    ood_accs = [model["OOD"] for model in other_models]
 
-        # Extract ImageNet and OOD accuracies
-        imagenet_accs = [model["ImageNet"] for model in other_models]
-        ood_accs = [model["OOD"] for model in other_models]
+    ax.scatter(
+        imagenet_accs,
+        ood_accs,
+        marker="d",
+        color="C2",
+        s=130,
+        label="Various checkpoints",
+        zorder=9,
+        alpha=0.7,
+    )
+    print(f"Plotted {len(other_models)} additional individual checkpoints")
 
-        ax.scatter(
-            imagenet_accs,
-            ood_accs,
-            marker="d",
-            color="C2",  # Green color like in main.py
-            s=130,
-            label="Various checkpoints",
-            zorder=9,  # Slightly behind other points
-            alpha=0.7,  # Slight transparency to avoid overcrowding
-        )
-        print(f"Plotted {len(other_models)} additional individual checkpoints")
-
-    # Set labels and grid
     ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
     ax.grid(True)
 
-    # Add legend with unique entries
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(
