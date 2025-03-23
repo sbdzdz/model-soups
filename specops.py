@@ -237,7 +237,7 @@ def main(args):
                 loss = optimizer.step(closure)
 
             log_gradient_norms(alpha_model)
-            log_alpha_values(alpha_model, args)
+            # log_alpha_values(alpha_model, args)
 
             epoch_loss += loss.item()
 
@@ -348,7 +348,7 @@ def parse_arguments():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=256,
+        default=512,
     )
     parser.add_argument(
         "--learning-rate",
@@ -365,13 +365,14 @@ def parse_arguments():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=5,
+        default=20,
         help="Number of training epochs",
     )
     parser.add_argument(
         "--optimizer",
         type=str,
         default="adam",
+        choices=["adam", "lbfgs"],
         help="Optimizer to use",
     )
     parser.add_argument(
