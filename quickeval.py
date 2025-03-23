@@ -3,10 +3,6 @@ import os
 import clip
 import json
 from pathlib import Path
-from tabulate import tabulate
-from tqdm import tqdm
-import numpy as np
-from typing import List
 import matplotlib.pyplot as plt
 import torch
 
@@ -20,7 +16,7 @@ from datasets import (
     ImageNetA,
 )
 from utils import test_model_on_dataset
-from merge import merge
+from specops import WeightedMergeLayer, WeightedMergeModel, WeightedMergeSpectrum
 
 ALL_DATASETS = [
     "ImageNet2p",
@@ -43,7 +39,7 @@ OOD_DATASETS = [
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Merge models and evaluate performance"
+        description="Evaluate specops model and create comparison plot"
     )
     parser.add_argument(
         "--model-location",
@@ -60,9 +56,8 @@ def parse_arguments():
     parser.add_argument(
         "--datasets",
         nargs="+",
-        default=["ImageNet2p"],
-        choices=ALL_DATASETS + ["all"],
-        help="Datasets to evaluate on",
+        default=["all"],
+        help="Datasets to evaluate on. Use 'all' for all datasets or specify individual datasets by name.",
     )
     parser.add_argument(
         "--batch-size",
@@ -77,16 +72,17 @@ def parse_arguments():
         help="Number of worker threads for data loading",
     )
     parser.add_argument(
-        "--output",
+        "--alphas-path",
         type=str,
-        default="quick_eval_results.json",
-        help="Output file for results",
+        required=True,
+        help="Path to the saved alpha weights file (.pt)",
     )
     parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        default=False,
-        help="Whether to overwrite existing results",
+        "--weighting",
+        type=str,
+        choices=["spectrum", "model", "layer"],
+        required=True,
+        help="Weighting scheme used for model merging",
     )
     return parser.parse_args()
 
@@ -104,64 +100,6 @@ def get_dataset_class(dataset_name):
     return dataset_map.get(dataset_name)
 
 
-def evaluate_modern_soup(alpha_model, datasets_to_eval, args, preprocess):
-    """Evaluate the modern soup model on multiple datasets"""
-    results = {}
-
-    for dataset_name in datasets_to_eval:
-        print(f"Evaluating modern soup on {dataset_name}...")
-        dataset_cls = get_dataset_class(dataset_name)
-        dataset = dataset_cls(
-            preprocess, args.dataset_location, args.batch_size, args.workers
-        )
-        accuracy = test_model_on_dataset(alpha_model, dataset)
-        results[dataset_name] = accuracy
-        print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
-
-    # Calculate average OOD performance
-    ood_accs = [results[dataset] for dataset in OOD_DATASETS if dataset in results]
-    avg_ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
-
-    return results, avg_ood_acc
-
-
-def add_to_scatter_plot(imagenet_acc, ood_acc):
-    """Add modern soup results to existing scatter plot"""
-    plt.figure()
-    try:
-        # Load existing plot if it exists
-        img = plt.imread("merge_comparison_plot.png")
-        plt.imshow(img)
-    except:
-        pass
-
-    # Add our new point
-    plt.scatter(
-        imagenet_acc,
-        ood_acc,
-        marker="D",  # Diamond marker to distinguish from others
-        color="red",
-        s=400,
-        label="Modern Learned Soup",
-        zorder=15,  # Place it on top
-    )
-
-    plt.ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
-    plt.xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
-    plt.grid(True)
-
-    # Update legend
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    plt.legend(
-        by_label.values(), by_label.keys(), fontsize=13, ncol=2, facecolor="white"
-    ).set_zorder(100)
-
-    plt.savefig("merge_comparison_plot_with_modern.png", bbox_inches="tight")
-    plt.close()
-    print("Updated scatter plot saved as merge_comparison_plot_with_modern.png")
-
-
 def main():
     args = parse_arguments()
 
@@ -171,216 +109,171 @@ def main():
     model_dir = Path(args.model_location)
     model_paths = [str(model_dir / f"model_{i}.pt") for i in range(72)]
 
+    print("Loading model checkpoints...")
+    raw_checkpoints = [torch.load(path, map_location="cpu") for path in model_paths]
+    checkpoints = [
+        {
+            k: v.requires_grad_(False) if isinstance(v, torch.Tensor) else v
+            for k, v in checkpoint.items()
+        }
+        for checkpoint in raw_checkpoints
+    ]
+
     datasets_to_eval = []
-    if "all" in args.datasets:
+    if args.datasets == ["all"] or "all" in args.datasets:
         datasets_to_eval = ALL_DATASETS
     else:
-        datasets_to_eval = args.datasets
-
-    results = {}
-    if os.path.exists(args.output) and not args.overwrite:
-        with open(args.output, "r") as f:
-            results = json.load(f)
-
-    model = merge(model_paths, base_model)
-    for dataset_name in datasets_to_eval:
-        if dataset_name in results[config_name] and not args.overwrite:
-            print(f"Skipping {dataset_name} for {config_name} - already evaluated")
-            continue
-
-        print(f"Evaluating on {dataset_name}...")
-        dataset_cls = get_dataset_class(dataset_name)
-        dataset = dataset_cls(
-            preprocess, args.dataset_location, args.batch_size, args.workers
-        )
-        accuracy = test_model_on_dataset(model, dataset)
-        results[config_name][dataset_name] = accuracy
-        print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
-
-        with open(args.output, "w") as f:
-            json.dump(results, f, indent=2)
-
-    print("\n=== FINAL RESULTS ===")
-    table_data = []
-    headers = ["Configuration"] + datasets_to_eval
-
-    for config_name, config_results in results.items():
-        row = [config_name]
-        for dataset in datasets_to_eval:
-            if dataset in config_results:
-                row.append(f"{config_results[dataset] * 100:.2f}%")
+        # Verify that all provided dataset names are valid
+        for dataset in args.datasets:
+            if dataset not in ALL_DATASETS:
+                print(
+                    f"Warning: Unknown dataset '{dataset}'. Available datasets: {', '.join(ALL_DATASETS)}"
+                )
             else:
-                row.append("N/A")
-        table_data.append(row)
+                datasets_to_eval.append(dataset)
 
-    if "ImageNet2p" in datasets_to_eval:
-        idx = datasets_to_eval.index("ImageNet2p") + 1
-        table_data.sort(
-            key=lambda x: float(x[idx].rstrip("%")) if x[idx] != "N/A" else 0,
-            reverse=True,
-        )
+        if not datasets_to_eval:
+            print("No valid datasets specified, using all datasets.")
+            datasets_to_eval = ALL_DATASETS
 
-    print(tabulate(table_data, headers=headers, tablefmt="grid"))
-    print(f"\nResults saved to {args.output}")
+    if args.alphas_path and args.weighting:
+        from utils import ModelWrapper
 
-    if set(datasets_to_eval) == set(ALL_DATASETS):
-        create_scatter_plot(results)
+        feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
+        num_classes = checkpoints[0]["classification_head.weight"].shape[0]
+        model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
 
-    # After training, evaluate on all specified datasets
-    print("\nEvaluating final model on all datasets...")
-    results, avg_ood_acc = evaluate_modern_soup(
-        model, datasets_to_eval, args, preprocess
-    )
+        print(f"Loading alpha values from {args.alphas_path}...")
+        alpha_values = torch.load(args.alphas_path, map_location="cpu")
 
-    # Save results
-    final_results = {
-        "modern_learned_soup": {
-            **results,
-            "config": {
-                "value": "learned",
-                "elect_sign": False,
-                "use_base": True,
-                "alpha": None,
-                "variant": "modern",
-            },
-        }
-    }
+        if args.weighting == "layer":
+            weighted_model = WeightedMergeLayer(model, checkpoints, unnormalised=False)
+            weighted_model._alpha = torch.nn.Parameter(alpha_values)
+        elif args.weighting == "spectrum":
+            weighted_model = WeightedMergeSpectrum(
+                model, checkpoints, num_singular_values=alpha_values.shape[1]
+            )
+            weighted_model.alpha = torch.nn.Parameter(alpha_values)
+        else:
+            weighted_model = WeightedMergeModel(model, checkpoints, unnormalised=False)
+            weighted_model._alpha = torch.nn.Parameter(alpha_values)
 
-    with open("modern_soup_results.json", "w") as f:
-        json.dump(final_results, f, indent=2)
+        model_name = f"specops_{args.weighting}"
 
-    # Add to scatter plot if we have both ImageNet and OOD results
-    if "ImageNet" in results:
-        print("\nUpdating scatter plot with modern soup results...")
-        add_to_scatter_plot(results["ImageNet"], avg_ood_acc)
+        results = {"model_name": model_name}
+        for dataset_name in datasets_to_eval:
+            print(f"Evaluating on {dataset_name}...")
+            dataset_cls = get_dataset_class(dataset_name)
+            dataset = dataset_cls(
+                preprocess, args.dataset_location, args.batch_size, args.workers
+            )
+            accuracy = test_model_on_dataset(weighted_model, dataset)
+            results[dataset_name] = accuracy
+            print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
 
-    # Print final results table
-    print("\n=== FINAL RESULTS ===")
-    table_data = [["Dataset", "Accuracy"]]
-    for dataset, acc in results.items():
-        table_data.append([dataset, f"{acc * 100:.2f}%"])
-    print(tabulate(table_data, headers="firstrow", tablefmt="grid"))
+        output_file = f"specops_{args.weighting}_results.jsonl"
+        with open(output_file, "w") as f:
+            f.write(json.dumps(results) + "\n")
+        print(f"Results saved to {output_file}")
+        create_comparison_plot(output_file)
 
 
-def create_scatter_plot(results):
+def create_comparison_plot(specops_results_file):
+    """
+    Create a scatter plot comparing all models using results from jsonl files.
 
+    Args:
+        specops_results_file: Path to the specops results jsonl file
+    """
     plt.figure(figsize=(12, 8))
     ax = plt.gca()
 
-    value_colors = {
-        "random": "C1",
-        "mean": "C0",
-        "median": "pink",
-        "max": "purple",
+    # Define colors and markers for different model types
+    model_styles = {
+        "specops_model": {
+            "color": "red",
+            "marker": "D",
+            "size": 300,
+            "label": "SpecOps (model)",
+        },
+        "specops_layer": {
+            "color": "green",
+            "marker": "D",
+            "size": 300,
+            "label": "SpecOps (layer)",
+        },
+        "specops_spectrum": {
+            "color": "blue",
+            "marker": "D",
+            "size": 300,
+            "label": "SpecOps (spectrum)",
+        },
+        "greedy_soup": {
+            "color": "C4",
+            "marker": "*",
+            "size": 400,
+            "label": "Greedy Soup",
+        },
+        "uniform_soup": {
+            "color": "orange",
+            "marker": "P",
+            "size": 300,
+            "label": "Uniform Soup",
+        },
+        "individual_models": {
+            "color": "slategray",
+            "marker": "h",
+            "size": 150,
+            "label": "Initialization (LP)",
+        },
     }
-    markers = {False: "o", True: "^"}
 
-    for config_results in results.values():
-        config = config_results["config"]
-        value = config["value"]
-        elect_sign = config["elect_sign"]
-        use_base = config["use_base"]
-        alpha = config["alpha"]
-        variant = config["variant"]
+    result_files = [
+        specops_results_file,
+        "greedy_soup_results.jsonl",
+        "uniform_soup_results.jsonl",
+        "individual_model_results.jsonl",
+    ]
 
-        ood_accs = [
-            config_results[dataset]
-            for dataset in OOD_DATASETS
-            if dataset in config_results
-        ]
-        ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+    for file_path in result_files:
+        try:
+            with open(file_path, "r") as f:
+                results = json.loads(f.readline())
 
-        imagenet_acc = config_results.get("ImageNet", 0)
+            model_name = results.get("model_name", Path(file_path).stem)
 
-        label_parts = [value.capitalize()]
-        if elect_sign:
-            label_parts.append("elect sign")
-        if use_base and alpha is not None:
-            label_parts.append(f"alpha={alpha:.1f}")
-        if variant:
-            label_parts.append(variant)
-
-        label = " ".join(
-            [
-                label_parts[0],
-                f"({', '.join(label_parts[1:])})" if len(label_parts) > 1 else "",
+            ood_accs = [
+                results[dataset] for dataset in OOD_DATASETS if dataset in results
             ]
-        ).strip()
+            ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+            imagenet_acc = results.get("ImageNet", 0)
 
-        if use_base:
-            color_alpha = 0.4 + (0.5 * alpha) if alpha is not None else 0.65
+            style = next(
+                (v for k, v in model_styles.items() if k in model_name),
+                {"color": "gray", "marker": "o", "size": 200, "label": model_name},
+            )
+
             ax.scatter(
                 imagenet_acc,
                 ood_acc,
-                marker=markers[elect_sign],
-                color=value_colors.get(value, "gray"),
-                s=200,
-                label=label,
-                alpha=color_alpha,
-                zorder=5,
-                linewidth=0,
-            )
-        else:
-            ax.scatter(
-                imagenet_acc,
-                ood_acc,
-                marker=markers[elect_sign],
-                edgecolors=value_colors.get(value, "gray"),
-                facecolors="none",
-                s=200,
-                label=label,
-                linewidth=2,
-                zorder=5,
+                marker=style["marker"],
+                color=style["color"],
+                s=style["size"],
+                label=style["label"],
+                zorder=10,
             )
 
-    # Add greedy soup results
-    with open("greedy_soup_results.jsonl", "r") as f:
-        greedy_soup_data = json.loads(f.readline())
+            print(
+                f"Plotted {model_name}: ImageNet={imagenet_acc:.4f}, Avg OOD={ood_acc:.4f}"
+            )
 
-    ood_accs = [
-        greedy_soup_data[dataset]
-        for dataset in OOD_DATASETS
-        if dataset in greedy_soup_data
-    ]
-    greedy_ood_acc = sum(ood_accs) / len(ood_accs) if ood_accs else 0
+        except FileNotFoundError:
+            print(f"Warning: Could not load {file_path}")
 
-    ax.scatter(
-        greedy_soup_data.get("ImageNet", 0.0),
-        greedy_ood_acc,
-        marker="*",
-        color="C4",
-        s=400,
-        label="Greedy Soup",
-        zorder=10,
-    )
-
-    # Add base model results
-    with open("individual_model_results.jsonl", "r") as f:
-        base_model_data = json.loads(f.readline())
-
-    base_ood_accs = [
-        base_model_data[dataset]
-        for dataset in OOD_DATASETS
-        if dataset in base_model_data
-    ]
-    base_ood_acc = sum(base_ood_accs) / len(base_ood_accs) if base_ood_accs else 0
-
-    ax.scatter(
-        base_model_data.get("ImageNet", 0.0),
-        base_ood_acc,
-        marker="h",
-        color="slategray",
-        s=150,
-        label="Initialization (LP)",
-        zorder=10,
-    )
-
-    # Set labels and grid
     ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
     ax.grid(True)
 
-    # Add legend with unique entries
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(
