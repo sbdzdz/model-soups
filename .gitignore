@@ -132,3 +132,8 @@ dmypy.json
 
 # logs
 wandb
+*.out
+*.err
+
+# data
+*.pt
