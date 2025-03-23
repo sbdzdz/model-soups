@@ -152,6 +152,10 @@ class WeightedMergeSpectrum(torch.nn.Module):
 
 
 def main(args):
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    alphas_save_dir = Path("alphas") / timestamp
+    alphas_save_dir.mkdir(exist_ok=True, parents=True)
+
     wandb.init(
         entity="codis",
         project="specops",
@@ -161,6 +165,7 @@ def main(args):
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
             "epochs": args.epochs,
+            "alphas_dir": str(alphas_save_dir),
         },
     )
 
@@ -254,19 +259,24 @@ def main(args):
 
         wandb.log({"train/epoch_loss": epoch_loss, "epoch": epoch})
 
-        if args.eval_every_epoch:
+        if (
+            args.eval_every_n_epochs is not None
+            and epoch % args.eval_every_n_epochs == 0
+        ):
             alpha_model.eval()
             with torch.no_grad():
-                train_acc = test_model_on_dataset(alpha_model, train_dataset)
-                print(f"Epoch {epoch} Train Accuracy: {train_acc:.2f}%")
-                wandb.log({"train/accuracy": train_acc, "epoch": epoch})
+                test_acc = test_model_on_dataset(alpha_model, test_dataset)
+                print(f"Epoch {epoch} Test Accuracy: {test_acc:.2f}%")
+                wandb.log({"test/accuracy": test_acc, "epoch": epoch})
+
+                alpha_path = alphas_save_dir / f"alphas_{epoch}.pt"
+                torch.save(alpha_model.alpha, alpha_path)
 
     test_acc = test_model_on_dataset(alpha_model, test_dataset)
     print(f"Test Accuracy: {test_acc:.2f}%")
     wandb.log({"test/accuracy": test_acc})
 
-    alpha_values = alpha_model.alpha.detach().cpu()
-    torch.save(alpha_values, f"alpha_values_{args.weighting}.pt")
+    torch.save(alpha_model.alpha, alphas_save_dir / "alphas.pt")
 
     wandb.finish()
 
@@ -385,9 +395,10 @@ def parse_arguments():
         "'spectrum' scales top singular values (WeightedMergeSpectrum)",
     )
     parser.add_argument(
-        "--eval-every-epoch",
-        action="store_true",
-        help="Evaluate accuracy on training set after every epoch",
+        "--eval-every-n-epochs",
+        type=int,
+        default=None,
+        help="Evaluate accuracy on training set after every n epochs",
     )
     parser.add_argument(
         "--num-singular-values",
