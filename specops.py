@@ -14,16 +14,29 @@ import wandb
 
 
 class WeightedMergeLayer(torch.nn.Module):
-    def __init__(self, model, checkpoints, unnormalised=False):
+    def __init__(self, model, checkpoints, unnormalised=False, use_task_vectors=True):
         """
         An interpolation merge with learnable weights (one weight per layer per model).
         """
         super().__init__()
         self.model = model
-        self.checkpoints = checkpoints
+        self.base_checkpoint = checkpoints[0]
+
+        if use_task_vectors:
+            self.task_vectors = []
+            for checkpoint in checkpoints[1:]:
+                task_vector = {}
+                for key in checkpoint.keys():
+                    task_vector[key] = checkpoint[key] - self.base_checkpoint[key]
+                self.task_vectors.append(task_vector)
+            self.checkpoints = self.task_vectors
+        else:
+            self.checkpoints = checkpoints[1:]
+
+        self.use_task_vectors = use_task_vectors
         self.unnormalised = unnormalised
-        num_params = len(checkpoints[0])
-        num_models = len(checkpoints)
+        num_params = len(self.checkpoints[0])
+        num_models = len(self.checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_params, num_models), dim=1)
         self._alpha = torch.nn.Parameter(alpha)
         self.beta = torch.nn.Parameter(torch.tensor(1.0))
@@ -42,9 +55,12 @@ class WeightedMergeLayer(torch.nn.Module):
                 [params[param_name] for params in self.checkpoints], dim=-1
             )
             weights = self.alpha[idx].cpu()
-            combined_params[param_name] = (
-                (stacked_params @ weights).squeeze().to(x.device)
-            )
+            combined = (stacked_params @ weights).squeeze()
+
+            if self.use_task_vectors:
+                combined = combined + self.base_checkpoint[param_name]
+
+            combined_params[param_name] = combined.to(x.device)
 
         output = func.functional_call(self.model, combined_params, (x,))
 
@@ -52,15 +68,28 @@ class WeightedMergeLayer(torch.nn.Module):
 
 
 class WeightedMergeModel(torch.nn.Module):
-    def __init__(self, model, checkpoints, unnormalised=False):
+    def __init__(self, model, checkpoints, unnormalised=False, use_task_vectors=True):
         """
         An interpolation merge with learnable weights (one weight per model).
         """
         super().__init__()
         self.model = model
-        self.checkpoints = checkpoints
+        self.base_checkpoint = checkpoints[0]
+
+        if use_task_vectors:
+            self.task_vectors = []
+            for checkpoint in checkpoints[1:]:
+                task_vector = {}
+                for key in checkpoint.keys():
+                    task_vector[key] = checkpoint[key] - self.base_checkpoint[key]
+                self.task_vectors.append(task_vector)
+            self.checkpoints = self.task_vectors
+        else:
+            self.checkpoints = checkpoints[1:]
+
+        self.use_task_vectors = use_task_vectors
         self.unnormalised = unnormalised
-        num_models = len(checkpoints)
+        num_models = len(self.checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_models), dim=0)
         self._alpha = torch.nn.Parameter(alpha)
 
@@ -83,15 +112,18 @@ class WeightedMergeModel(torch.nn.Module):
             weight_shape = [weights.shape[0]] + [1] * (stacked_params.dim() - 1)
             broadcast_weights = weights.view(*weight_shape)
 
-            combined_params[param_name] = torch.sum(
-                stacked_params * broadcast_weights, dim=0
-            ).to(x.device)
+            combined = torch.sum(stacked_params * broadcast_weights, dim=0)
+
+            if self.use_task_vectors:
+                combined = combined + self.base_checkpoint[param_name]
+
+            combined_params[param_name] = combined.to(x.device)
 
         return func.functional_call(self.model, combined_params, (x,))
 
 
 class WeightedMergeSpectrum(torch.nn.Module):
-    def __init__(self, model, checkpoints, num_singular_values):
+    def __init__(self, model, checkpoints, num_singular_values, use_task_vectors=True):
         """
         A merge that modifies the spectrum of parameter matrices by scaling
         the top singular values with learnable parameters.
@@ -103,9 +135,22 @@ class WeightedMergeSpectrum(torch.nn.Module):
         """
         super().__init__()
         self.model = model
-        self.checkpoints = checkpoints
+        self.base_checkpoint = checkpoints[0]
+
+        if use_task_vectors:
+            self.task_vectors = []
+            for checkpoint in checkpoints[1:]:
+                task_vector = {}
+                for key in checkpoint.keys():
+                    task_vector[key] = checkpoint[key] - self.base_checkpoint[key]
+                self.task_vectors.append(task_vector)
+            self.checkpoints = self.task_vectors
+        else:
+            self.checkpoints = checkpoints[1:]
+
+        self.use_task_vectors = use_task_vectors
         self.num_singular_values = num_singular_values
-        num_params = len(checkpoints[0])
+        num_params = len(self.checkpoints[0])
 
         self.alpha = torch.nn.Parameter(torch.ones(num_params, num_singular_values))
 
@@ -134,7 +179,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
         combined_params = {}
 
         for idx, param_name in enumerate(self.checkpoints[0].keys()):
-            combined_params[param_name] = self.avg_params[param_name].to(x.device)
+            param = self.avg_params[param_name]
 
             if self.svd_components[param_name] is not None:
                 components = self.svd_components[param_name]
@@ -145,8 +190,12 @@ class WeightedMergeSpectrum(torch.nn.Module):
                 S_modified[:top_k] = S[:top_k] * self.alpha[idx, :top_k].cpu()
                 S_diag = torch.diag(S_modified)
 
-                reconstructed = torch.linalg.multi_dot([U, S_diag, Vh])
-                combined_params[param_name] = reconstructed.to(x.device)
+                param = torch.linalg.multi_dot([U, S_diag, Vh])
+
+            if self.use_task_vectors:
+                param = param + self.base_checkpoint[param_name]
+
+            combined_params[param_name] = param.to(x.device)
 
         return func.functional_call(self.model, combined_params, (x,))
 
@@ -208,13 +257,20 @@ def main(args):
         param.requires_grad = False
 
     if args.weighting == "layer":
-        alpha_model = WeightedMergeLayer(model, checkpoints, args.unnormalised)
+        alpha_model = WeightedMergeLayer(
+            model, checkpoints, args.unnormalised, args.task_vectors
+        )
     elif args.weighting == "spectrum":
         alpha_model = WeightedMergeSpectrum(
-            model, checkpoints, num_singular_values=args.num_singular_values
+            model,
+            checkpoints,
+            num_singular_values=args.num_singular_values,
+            use_task_vectors=args.task_vectors,
         )
     else:
-        alpha_model = WeightedMergeModel(model, checkpoints, args.unnormalised)
+        alpha_model = WeightedMergeModel(
+            model, checkpoints, args.unnormalised, args.task_vectors
+        )
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = create_optimizer(alpha_model, args)
@@ -423,6 +479,11 @@ def parse_arguments():
         "--unnormalised",
         action="store_true",
         help="Use unnormalised weights instead of softmax-normalized weights",
+    )
+    parser.add_argument(
+        "--task-vectors",
+        action="store_false",
+        help="If True, perform merging on task vectors (checkpoint - base) instead of raw checkpoints",
     )
     return parser.parse_args()
 
