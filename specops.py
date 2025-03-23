@@ -14,13 +14,14 @@ import wandb
 
 
 class WeightedMergeLayer(torch.nn.Module):
-    def __init__(self, model, checkpoints):
+    def __init__(self, model, checkpoints, unnormalised=False):
         """
         An interpolation merge with learnable weights (one weight per layer per model).
         """
         super().__init__()
         self.model = model
         self.checkpoints = checkpoints
+        self.unnormalised = unnormalised
         num_params = len(checkpoints[0])
         num_models = len(checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_params, num_models), dim=1)
@@ -29,7 +30,10 @@ class WeightedMergeLayer(torch.nn.Module):
 
     @property
     def alpha(self):
-        return torch.nn.functional.softmax(self._alpha, dim=1)
+        if self.unnormalised:
+            return self._alpha
+        else:
+            return torch.nn.functional.softmax(self._alpha, dim=1)
 
     def forward(self, x):
         combined_params = {}
@@ -48,20 +52,24 @@ class WeightedMergeLayer(torch.nn.Module):
 
 
 class WeightedMergeModel(torch.nn.Module):
-    def __init__(self, model, checkpoints):
+    def __init__(self, model, checkpoints, unnormalised=False):
         """
         An interpolation merge with learnable weights (one weight per model).
         """
         super().__init__()
         self.model = model
         self.checkpoints = checkpoints
+        self.unnormalised = unnormalised
         num_models = len(checkpoints)
         alpha = torch.nn.functional.softmax(torch.ones(num_models), dim=0)
         self._alpha = torch.nn.Parameter(alpha)
 
     @property
     def alpha(self):
-        return torch.nn.functional.softmax(self._alpha, dim=0)
+        if self.unnormalised:
+            return self._alpha
+        else:
+            return torch.nn.functional.softmax(self._alpha, dim=0)
 
     def forward(self, x):
         combined_params = {}
@@ -195,13 +203,13 @@ def main(args):
         param.requires_grad = False
 
     if args.weighting == "layer":
-        alpha_model = WeightedMergeLayer(model, checkpoints)
+        alpha_model = WeightedMergeLayer(model, checkpoints, args.unnormalised)
     elif args.weighting == "spectrum":
         alpha_model = WeightedMergeSpectrum(
             model, checkpoints, num_singular_values=args.num_singular_values
         )
     else:
-        alpha_model = WeightedMergeModel(model, checkpoints)
+        alpha_model = WeightedMergeModel(model, checkpoints, args.unnormalised)
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = create_optimizer(alpha_model, args)
@@ -257,6 +265,9 @@ def main(args):
     print(f"Test Accuracy: {test_acc:.2f}%")
     wandb.log({"test/accuracy": test_acc})
 
+    alpha_values = alpha_model.alpha.detach().cpu()
+    torch.save(alpha_values, f"alpha_values_{args.weighting}.pt")
+
     wandb.finish()
 
 
@@ -290,30 +301,34 @@ def create_optimizer(alpha_model, args):
 
 def log_alpha_values(alpha_model, args):
     alpha_values = alpha_model.alpha.detach().cpu().numpy()
-    if args.weighting == "layer" or args.weighting == "spectrum":
-        alpha_dict = {
-            f"alpha_distribution/layer_{i}": alpha_values[i]
-            for i in range(len(alpha_values))
-        }
-    else:
-        alpha_dict = {
-            f"alpha_over_time/model_{i}": alpha_values[i]
-            for i in range(len(alpha_values))
-        }
+    try:
+        if args.weighting == "layer" or args.weighting == "spectrum":
+            alpha_dict = {
+                f"alpha_distribution/layer_{i}": alpha_values[i]
+                for i in range(len(alpha_values))
+            }
+        else:
+            alpha_dict = {
+                f"alpha_over_time/model_{i}": alpha_values[i]
+                for i in range(len(alpha_values))
+            }
 
-    wandb.log(alpha_dict)
+        wandb.log(alpha_dict)
+    except ValueError:
+        print("No alpha values to log")
 
 
 def log_gradient_norms(alpha_model):
     """
     Log the gradient norms of alpha and beta parameters to wandb.
     """
-    alpha_grad_norm = torch.norm(alpha_model.alpha.grad).item()
-    wandb.log(
-        {
-            "gradients/alpha_norm": alpha_grad_norm,
-        }
-    )
+    if alpha_model.alpha.grad is not None:
+        alpha_grad_norm = torch.norm(alpha_model.alpha.grad).item()
+        wandb.log(
+            {
+                "gradients/alpha_norm": alpha_grad_norm,
+            }
+        )
 
 
 def parse_arguments():
@@ -391,6 +406,11 @@ def parse_arguments():
         type=str,
         default="model-soups",
         help="Weights & Biases project name",
+    )
+    parser.add_argument(
+        "--unnormalised",
+        action="store_true",
+        help="Use unnormalised weights instead of softmax-normalized weights",
     )
     return parser.parse_args()
 
