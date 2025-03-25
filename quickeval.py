@@ -89,6 +89,11 @@ def parse_arguments():
         action="store_true",
         help="Overwrite existing results files",
     )
+    parser.add_argument(
+        "--task-vectors",
+        action="store_true",
+        help="Use task vectors for model merging",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +113,9 @@ def get_dataset_class(dataset_name):
 def main():
     args = parse_arguments()
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
     output_file = Path(f"results/specops_{args.weighting}.jsonl")
 
     if output_file.exists() and not args.overwrite:
@@ -117,7 +125,7 @@ def main():
         return
 
     print("Loading base CLIP model...")
-    base_model, preprocess = clip.load("ViT-B/32", "cpu", jit=False)
+    base_model, preprocess = clip.load("ViT-B/32", device, jit=False)
 
     model_dir = args.model_location
     model_paths = [model_dir / f"model_{i}.pt" for i in range(72)]
@@ -156,19 +164,34 @@ def main():
         model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
 
         print(f"Loading alpha values from {args.alphas_path}...")
-        alpha_values = torch.load(args.alphas_path, map_location="cpu")
+        alpha_values = torch.load(args.alphas_path, map_location=device)
 
         if args.weighting == "layer":
-            weighted_model = WeightedMergeLayer(model, checkpoints, unnormalised=False)
+            weighted_model = WeightedMergeLayer(
+                model,
+                checkpoints,
+                unnormalised=True,
+                use_task_vectors=args.task_vectors,
+            )
             weighted_model._alpha = torch.nn.Parameter(alpha_values)
         elif args.weighting == "spectrum":
             weighted_model = WeightedMergeSpectrum(
-                model, checkpoints, num_singular_values=alpha_values.shape[1]
+                model,
+                checkpoints,
+                num_singular_values=alpha_values.shape[1],
+                use_task_vectors=args.task_vectors,
             )
             weighted_model.alpha = torch.nn.Parameter(alpha_values)
         else:
-            weighted_model = WeightedMergeModel(model, checkpoints, unnormalised=False)
+            weighted_model = WeightedMergeModel(
+                model,
+                checkpoints,
+                unnormalised=True,
+                use_task_vectors=args.task_vectors,
+            )
             weighted_model._alpha = torch.nn.Parameter(alpha_values)
+
+        weighted_model = weighted_model.to(device)
 
         model_name = f"specops_{args.weighting}"
 
@@ -223,15 +246,15 @@ def create_comparison_plot(specops_results_file):
 
     specops_data = results_data["specops"]
     weighting = specops_data["model_name"].split("_")[1]
-    colors = {"model": "red", "layer": "green", "spectrum": "blue"}
+    colors = {"model": "green", "layer": "red", "spectrum": "blue"}
     ax.scatter(
         specops_data["ImageNet"],
         specops_data["OOD"],
         marker="o",
         color=colors.get(weighting, "magenta"),
-        s=200,
-        label=f"Spectrum parametrised",
-        zorder=10,
+        s=100,
+        label=f"Weighted average",
+        zorder=100,
     )
     print(
         f"Plotted SpecOps ({weighting}): ImageNet={specops_data['ImageNet']:.4f}, OOD={specops_data['OOD']:.4f}"
@@ -241,9 +264,9 @@ def create_comparison_plot(specops_results_file):
     ax.scatter(
         greedy_data["ImageNet"],
         greedy_data["OOD"],
-        marker="*",
+        marker="o",
         color="C4",
-        s=400,
+        s=100,
         label="Greedy Soup",
         zorder=10,
     )
@@ -255,9 +278,9 @@ def create_comparison_plot(specops_results_file):
     ax.scatter(
         uniform_data["ImageNet"],
         uniform_data["OOD"],
-        marker="P",
+        marker="o",
         color="C0",
-        s=300,
+        s=100,
         label="Uniform Soup",
         zorder=10,
     )
@@ -305,7 +328,6 @@ def create_comparison_plot(specops_results_file):
         s=130,
         label="Various checkpoints",
         zorder=9,
-        alpha=0.7,
     )
     print(f"Plotted {len(other_models)} additional individual checkpoints")
 
@@ -313,10 +335,19 @@ def create_comparison_plot(specops_results_file):
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
     ax.grid(True)
 
+    # Add these two lines to set the axis limits
+    ax.set_ylim(0.36, 0.52)
+    ax.set_xlim(0.745, 0.82)
+
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     ax.legend(
-        by_label.values(), by_label.keys(), fontsize=13, ncol=2, facecolor="white"
+        by_label.values(),
+        by_label.keys(),
+        fontsize=13,
+        ncol=2,
+        facecolor="white",
+        loc="lower right",
     ).set_zorder(100)
 
     plt.savefig("merge_comparison_plot.png", bbox_inches="tight")
