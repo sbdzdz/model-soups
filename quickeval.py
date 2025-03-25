@@ -89,11 +89,6 @@ def parse_arguments():
         action="store_true",
         help="Overwrite existing results files",
     )
-    parser.add_argument(
-        "--task-vectors",
-        action="store_true",
-        help="Use task vectors for model merging",
-    )
     return parser.parse_args()
 
 
@@ -171,7 +166,6 @@ def main():
                 model,
                 checkpoints,
                 unnormalised=True,
-                use_task_vectors=args.task_vectors,
             )
             weighted_model._alpha = torch.nn.Parameter(alpha_values)
         elif args.weighting == "spectrum":
@@ -179,7 +173,6 @@ def main():
                 model,
                 checkpoints,
                 num_singular_values=alpha_values.shape[1],
-                use_task_vectors=args.task_vectors,
             )
             weighted_model.alpha = torch.nn.Parameter(alpha_values)
         else:
@@ -187,7 +180,6 @@ def main():
                 model,
                 checkpoints,
                 unnormalised=True,
-                use_task_vectors=args.task_vectors,
             )
             weighted_model._alpha = torch.nn.Parameter(alpha_values)
 
