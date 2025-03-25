@@ -4,6 +4,7 @@ import wget
 import torch
 import clip
 import os
+from pathlib import Path
 import json
 import operator
 
@@ -99,10 +100,10 @@ def parse_arguments():
 if __name__ == "__main__":
     args = parse_arguments()
     NUM_MODELS = 72
-    INDIVIDUAL_MODEL_RESULTS_FILE = "individual_model_results.jsonl"
-    UNIFORM_SOUP_RESULTS_FILE = "uniform_soup_results.jsonl"
-    GREEDY_SOUP_RESULTS_FILE = "greedy_soup_results.jsonl"
-    RANDOM_MERGE_RESULTS_FILE = "random_merge_results.jsonl"
+    INDIVIDUAL_MODEL_RESULTS_FILE = Path("results/individual_model.jsonl")
+    UNIFORM_SOUP_RESULTS_FILE = Path("results/uniform_soup.jsonl")
+    GREEDY_SOUP_RESULTS_FILE = Path("results/greedy_soup.jsonl")
+    RANDOM_MERGE_RESULTS_FILE = Path("results/random_merge.jsonl")
 
     # Step 1: Download models.
     if args.download_models:
@@ -399,7 +400,7 @@ if __name__ == "__main__":
             random_merge_db["ImageNet"] * random_merge_db["OOD"]
         )
 
-        plt.figure(figsize=(12, 12))
+        plt.figure(figsize=(18, 12))
         ax = plt.gca()
 
         ax.scatter(
@@ -446,7 +447,7 @@ if __name__ == "__main__":
             "random": "C1",
             "mean": "C0",
             "median": "pink",
-            "max": "purple",  # Added for completeness
+            "max": "purple",
         }
         markers = {False: "o", True: "^"}
 
