@@ -216,6 +216,47 @@ def create_comparison_plot(specops_results_file):
     plt.figure(figsize=(12, 12))
     ax = plt.gca()
 
+    path = Path("results/individual_model.jsonl")
+    individual_models = []
+    with open(path, "r") as f:
+        for line in f:
+            individual_models.append(json.loads(line))
+
+    print(f"Loaded {len(individual_models)} individual models")
+
+    for model in individual_models:
+        ood_accs = [model[dataset] for dataset in OOD_DATASETS]
+        model["OOD"] = sum(ood_accs) / len(ood_accs)
+
+    base_model = individual_models[0]
+    ax.scatter(
+        base_model["ImageNet"],
+        base_model["OOD"],
+        marker="h",
+        color="slategray",
+        s=150,
+        label="Initialization (LP)",
+        zorder=10,
+    )
+    print(
+        f"Plotted Initialization: ImageNet={base_model['ImageNet']:.4f}, OOD={base_model['OOD']:.4f}"
+    )
+
+    other_models = individual_models[1:]
+    imagenet_accs = [model["ImageNet"] for model in other_models]
+    ood_accs = [model["OOD"] for model in other_models]
+
+    ax.scatter(
+        imagenet_accs,
+        ood_accs,
+        marker="d",
+        color="C2",
+        s=130,
+        label="Various checkpoints",
+        zorder=9,
+    )
+    print(f"Plotted {len(other_models)} additional individual checkpoints")
+
     result_files = {
         "specops": specops_results_file,
         "greedy_soup": Path("results/greedy_soup.jsonl"),
@@ -238,32 +279,17 @@ def create_comparison_plot(specops_results_file):
 
     specops_data = results_data["specops"]
     weighting = specops_data["model_name"].split("_")[1]
-    colors = {"model": "green", "layer": "red", "spectrum": "blue"}
     ax.scatter(
         specops_data["ImageNet"],
         specops_data["OOD"],
         marker="o",
-        color=colors.get(weighting, "magenta"),
+        color="red",
         s=100,
         label=f"Weighted average",
         zorder=100,
     )
     print(
         f"Plotted SpecOps ({weighting}): ImageNet={specops_data['ImageNet']:.4f}, OOD={specops_data['OOD']:.4f}"
-    )
-
-    greedy_data = results_data["greedy_soup"]
-    ax.scatter(
-        greedy_data["ImageNet"],
-        greedy_data["OOD"],
-        marker="o",
-        color="C4",
-        s=100,
-        label="Greedy Soup",
-        zorder=10,
-    )
-    print(
-        f"Plotted Greedy Soup: ImageNet={greedy_data['ImageNet']:.4f}, OOD={greedy_data['OOD']:.4f}"
     )
 
     uniform_data = results_data["uniform_soup"]
@@ -280,48 +306,19 @@ def create_comparison_plot(specops_results_file):
         f"Plotted Uniform Soup: ImageNet={uniform_data['ImageNet']:.4f}, OOD={uniform_data['OOD']:.4f}"
     )
 
-    individual_models = []
-    path = Path("results/individual_model.jsonl")
-    with open(path, "r") as f:
-        for line in f:
-            if line.strip():
-                individual_models.append(json.loads(line))
-
-    print(f"Loaded {len(individual_models)} individual models")
-
-    for model in individual_models:
-        ood_accs = [model[dataset] for dataset in OOD_DATASETS]
-        model["OOD"] = sum(ood_accs) / len(ood_accs)
-
-    if individual_models:
-        base_model = individual_models[0]
-        ax.scatter(
-            base_model["ImageNet"],
-            base_model["OOD"],
-            marker="h",
-            color="slategray",
-            s=150,
-            label="Initialization (LP)",
-            zorder=10,
-        )
-        print(
-            f"Plotted Initialization: ImageNet={base_model['ImageNet']:.4f}, OOD={base_model['OOD']:.4f}"
-        )
-
-    other_models = individual_models[1:]
-    imagenet_accs = [model["ImageNet"] for model in other_models]
-    ood_accs = [model["OOD"] for model in other_models]
-
+    greedy_data = results_data["greedy_soup"]
     ax.scatter(
-        imagenet_accs,
-        ood_accs,
-        marker="d",
-        color="C2",
-        s=130,
-        label="Various checkpoints",
-        zorder=9,
+        greedy_data["ImageNet"],
+        greedy_data["OOD"],
+        marker="o",
+        color="C4",
+        s=100,
+        label="Greedy Soup",
+        zorder=10,
     )
-    print(f"Plotted {len(other_models)} additional individual checkpoints")
+    print(
+        f"Plotted Greedy Soup: ImageNet={greedy_data['ImageNet']:.4f}, OOD={greedy_data['OOD']:.4f}"
+    )
 
     ax.set_ylabel("Avg. accuracy on distribution shifts (%)", fontsize=16)
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
