@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
+from utils import ModelWrapper
 
 from datasets import (
     ImageNet2p,
@@ -83,68 +84,57 @@ def main(args):
         datasets_to_eval = ALL_DATASETS
     else:
         for dataset in args.datasets:
-            if dataset not in ALL_DATASETS:
-                print(
-                    f"Warning: Unknown dataset '{dataset}'. Available datasets: {', '.join(ALL_DATASETS)}"
-                )
-            else:
-                datasets_to_eval.append(dataset)
+            assert dataset in ALL_DATASETS, f"Dataset {dataset} not in {ALL_DATASETS}"
+            datasets_to_eval.append(dataset)
 
-        if not datasets_to_eval:
-            print("No valid datasets specified, using all datasets.")
-            datasets_to_eval = ALL_DATASETS
+    feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
+    num_classes = checkpoints[0]["classification_head.weight"].shape[0]
+    model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
 
-    if args.alphas_path and args.weighting:
-        from utils import ModelWrapper
+    print(f"Loading alpha values from {args.alphas_path}...")
+    alpha_values = torch.load(args.alphas_path, map_location=device)
 
-        feature_dim = checkpoints[0]["classification_head.weight"].shape[1]
-        num_classes = checkpoints[0]["classification_head.weight"].shape[0]
-        model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
+    if args.weighting == "model":
+        weighted_model = WeightedMergeModel(
+            model,
+            checkpoints,
+            unnormalised=True,
+        )
+        weighted_model._alpha = torch.nn.Parameter(alpha_values)
+    elif args.weighting == "layer":
+        weighted_model = WeightedMergeLayer(
+            model,
+            checkpoints,
+            unnormalised=True,
+        )
+        weighted_model._alpha = torch.nn.Parameter(alpha_values)
+    elif args.weighting == "spectrum":
+        weighted_model = WeightedMergeSpectrum(
+            model,
+            checkpoints,
+            num_singular_values=alpha_values.shape[1],
+        )
+        weighted_model.alpha = torch.nn.Parameter(alpha_values)
+    else:
+        raise ValueError(f"Unknown weighting scheme: {args.weighting}")
 
-        print(f"Loading alpha values from {args.alphas_path}...")
-        alpha_values = torch.load(args.alphas_path, map_location=device)
+    weighted_model = weighted_model.to(device)
+    model_name = f"specops_{args.weighting}"
 
-        if args.weighting == "model":
-            weighted_model = WeightedMergeModel(
-                model,
-                checkpoints,
-                unnormalised=True,
-            )
-            weighted_model._alpha = torch.nn.Parameter(alpha_values)
-        elif args.weighting == "layer":
-            weighted_model = WeightedMergeLayer(
-                model,
-                checkpoints,
-                unnormalised=True,
-            )
-            weighted_model._alpha = torch.nn.Parameter(alpha_values)
-        elif args.weighting == "spectrum":
-            weighted_model = WeightedMergeSpectrum(
-                model,
-                checkpoints,
-                num_singular_values=alpha_values.shape[1],
-            )
-            weighted_model.alpha = torch.nn.Parameter(alpha_values)
-        else:
-            raise ValueError(f"Unknown weighting scheme: {args.weighting}")
+    results = {"model_name": model_name}
+    for dataset_name in datasets_to_eval:
+        print(f"Evaluating on {dataset_name}...")
+        dataset_cls = get_dataset_class(dataset_name)
+        dataset = dataset_cls(
+            preprocess, args.dataset_location, args.batch_size, args.workers
+        )
+        accuracy = test_model_on_dataset(weighted_model, dataset)
+        results[dataset_name] = accuracy
+        print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
 
-        weighted_model = weighted_model.to(device)
-        model_name = f"specops_{args.weighting}"
-
-        results = {"model_name": model_name}
-        for dataset_name in datasets_to_eval:
-            print(f"Evaluating on {dataset_name}...")
-            dataset_cls = get_dataset_class(dataset_name)
-            dataset = dataset_cls(
-                preprocess, args.dataset_location, args.batch_size, args.workers
-            )
-            accuracy = test_model_on_dataset(weighted_model, dataset)
-            results[dataset_name] = accuracy
-            print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
-
-        with open(output_file, "w") as f:
-            f.write(json.dumps(results) + "\n")
-        print(f"Results saved to {output_file}")
+    with open(output_file, "w") as f:
+        f.write(json.dumps(results) + "\n")
+    print(f"Results saved to {output_file}")
 
     create_comparison_plot(output_file)
 
