@@ -37,61 +37,6 @@ OOD_DATASETS = [
 ]
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(
-        description="Evaluate specops model and create comparison plot"
-    )
-    parser.add_argument(
-        "--model-location",
-        type=Path,
-        default=Path(os.environ.get("WORK", ".")) / "models",
-        help="Directory containing model checkpoints",
-    )
-    parser.add_argument(
-        "--dataset-location",
-        type=Path,
-        default=Path(os.environ.get("WORK", ".")) / "datasets",
-        help="Root directory for datasets",
-    )
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["all"],
-        help="Datasets to evaluate on. Use 'all' for all datasets or specify individual datasets by name.",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=1024,
-        help="Batch size for evaluation",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=8,
-        help="Number of worker threads for data loading",
-    )
-    parser.add_argument(
-        "--alphas-path",
-        type=Path,
-        required=True,
-        help="Path to the saved alpha weights file (.pt)",
-    )
-    parser.add_argument(
-        "--weighting",
-        type=str,
-        choices=["spectrum", "model", "layer"],
-        required=True,
-        help="Weighting scheme used for model merging",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing results files",
-    )
-    return parser.parse_args()
-
-
 def get_dataset_class(dataset_name):
     dataset_map = {
         "ImageNet2p": ImageNet2p,
@@ -105,9 +50,7 @@ def get_dataset_class(dataset_name):
     return dataset_map.get(dataset_name)
 
 
-def main():
-    args = parse_arguments()
-
+def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -161,7 +104,14 @@ def main():
         print(f"Loading alpha values from {args.alphas_path}...")
         alpha_values = torch.load(args.alphas_path, map_location=device)
 
-        if args.weighting == "layer":
+        if args.weighting == "model":
+            weighted_model = WeightedMergeModel(
+                model,
+                checkpoints,
+                unnormalised=True,
+            )
+            weighted_model._alpha = torch.nn.Parameter(alpha_values)
+        elif args.weighting == "layer":
             weighted_model = WeightedMergeLayer(
                 model,
                 checkpoints,
@@ -176,15 +126,9 @@ def main():
             )
             weighted_model.alpha = torch.nn.Parameter(alpha_values)
         else:
-            weighted_model = WeightedMergeModel(
-                model,
-                checkpoints,
-                unnormalised=True,
-            )
-            weighted_model._alpha = torch.nn.Parameter(alpha_values)
+            raise ValueError(f"Unknown weighting scheme: {args.weighting}")
 
         weighted_model = weighted_model.to(device)
-
         model_name = f"specops_{args.weighting}"
 
         results = {"model_name": model_name}
@@ -192,7 +136,7 @@ def main():
             print(f"Evaluating on {dataset_name}...")
             dataset_cls = get_dataset_class(dataset_name)
             dataset = dataset_cls(
-                preprocess, str(args.dataset_location), args.batch_size, args.workers
+                preprocess, args.dataset_location, args.batch_size, args.workers
             )
             accuracy = test_model_on_dataset(weighted_model, dataset)
             results[dataset_name] = accuracy
@@ -324,7 +268,6 @@ def create_comparison_plot(specops_results_file):
     ax.set_xlabel("ImageNet Accuracy (top-1%)", fontsize=16)
     ax.grid(True)
 
-    # Add these two lines to set the axis limits
     ax.set_ylim(0.36, 0.52)
     ax.set_xlim(0.745, 0.82)
 
@@ -344,5 +287,61 @@ def create_comparison_plot(specops_results_file):
     print("Scatter plot saved as merge_comparison_plot.png")
 
 
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description="Evaluate specops model and create comparison plot"
+    )
+    parser.add_argument(
+        "--model-location",
+        type=Path,
+        default=Path(os.environ.get("WORK", ".")) / "models",
+        help="Directory containing model checkpoints",
+    )
+    parser.add_argument(
+        "--dataset-location",
+        type=Path,
+        default=Path(os.environ.get("WORK", ".")) / "datasets",
+        help="Root directory for datasets",
+    )
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=["all"],
+        help="Datasets to evaluate on. Use 'all' for all datasets or specify individual datasets by name.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1024,
+        help="Batch size for evaluation",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of worker threads for data loading",
+    )
+    parser.add_argument(
+        "--alphas-path",
+        type=Path,
+        required=True,
+        help="Path to the saved alpha weights file (.pt)",
+    )
+    parser.add_argument(
+        "--weighting",
+        type=str,
+        choices=["spectrum", "model", "layer"],
+        required=True,
+        help="Weighting scheme used for model merging",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing results files",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    main()
+    args = parse_arguments()
+    main(args)
