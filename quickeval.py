@@ -108,14 +108,14 @@ def main(args):
             weighted_model = WeightedMergeModel(
                 model,
                 checkpoints,
-                unnormalised=True,
+                normalize=False,
             )
             weighted_model._alpha = alpha_values
         elif variant == "layer":
             weighted_model = WeightedMergeLayer(
                 model,
                 checkpoints,
-                unnormalised=True,
+                normalize=False,
             )
             weighted_model._alpha = alpha_values
         elif variant == "spectrum":
@@ -123,6 +123,7 @@ def main(args):
                 model,
                 checkpoints,
                 num_singular_values=alpha_values.shape[1],
+                normalize=False,
             )
             weighted_model.alpha = alpha_values
         else:
