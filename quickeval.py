@@ -4,6 +4,7 @@ import clip
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from utils import ModelWrapper
 
@@ -55,11 +56,14 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    output_file = Path(f"results/specops_{args.weighting}.jsonl")
+    output_file = Path("results/quickeval.jsonl")
+    if output_file.exists():
+        with open(output_file) as f:
+            results = [json.loads(line) for line in f]
 
-    if output_file.exists() and not args.overwrite:
-        print(f"Results file {output_file} already exists and --overwrite not set.")
-        print("Skipping evaluation and creating plot directly.")
+    existing_variants = [result["model_name"] for result in results]
+    if all(variant in existing_variants for variant in args.variants):
+        print("No evaluation needed. Creating plot directly.")
         create_comparison_plot(output_file)
         return
 
@@ -91,61 +95,72 @@ def main(args):
     num_classes = checkpoints[0]["classification_head.weight"].shape[0]
     model = ModelWrapper(base_model, feature_dim, num_classes, normalize=True)
 
-    print(f"Loading alpha values from {args.alphas_path}...")
-    alpha_values = torch.load(args.alphas_path, map_location=device)
+    for alpha_path, variant in zip(args.alphas_paths, args.variants):
+        existing_result = next((r for r in results if r["model_name"] == variant), None)
+        if existing_result and not args.overwrite:
+            print(f"Skipping evaluation for {variant}.")
+            continue
 
-    if args.weighting == "model":
-        weighted_model = WeightedMergeModel(
-            model,
-            checkpoints,
-            unnormalised=True,
-        )
-        weighted_model._alpha = torch.nn.Parameter(alpha_values)
-    elif args.weighting == "layer":
-        weighted_model = WeightedMergeLayer(
-            model,
-            checkpoints,
-            unnormalised=True,
-        )
-        weighted_model._alpha = torch.nn.Parameter(alpha_values)
-    elif args.weighting == "spectrum":
-        weighted_model = WeightedMergeSpectrum(
-            model,
-            checkpoints,
-            num_singular_values=alpha_values.shape[1],
-        )
-        weighted_model.alpha = torch.nn.Parameter(alpha_values)
-    else:
-        raise ValueError(f"Unknown weighting scheme: {args.weighting}")
+        print(f"Loading alpha values from {alpha_path}...")
+        alpha_values = torch.load(alpha_path, map_location=device)
 
-    weighted_model = weighted_model.to(device)
-    model_name = f"specops_{args.weighting}"
+        if variant == "model":
+            weighted_model = WeightedMergeModel(
+                model,
+                checkpoints,
+                unnormalised=True,
+            )
+            weighted_model._alpha = alpha_values
+        elif variant == "layer":
+            weighted_model = WeightedMergeLayer(
+                model,
+                checkpoints,
+                unnormalised=True,
+            )
+            weighted_model._alpha = alpha_values
+        elif variant == "spectrum":
+            weighted_model = WeightedMergeSpectrum(
+                model,
+                checkpoints,
+                num_singular_values=alpha_values.shape[1],
+            )
+            weighted_model.alpha = alpha_values
+        else:
+            raise ValueError(f"Unknown weighting scheme: {variant}")
 
-    results = {"model_name": model_name}
-    for dataset_name in datasets_to_eval:
-        print(f"Evaluating on {dataset_name}...")
-        dataset_cls = get_dataset_class(dataset_name)
-        dataset = dataset_cls(
-            preprocess, args.dataset_location, args.batch_size, args.workers
-        )
-        accuracy = test_model_on_dataset(weighted_model, dataset)
-        results[dataset_name] = accuracy
-        print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
+        weighted_model = weighted_model.to(device)
 
-    with open(output_file, "w") as f:
-        f.write(json.dumps(results) + "\n")
-    print(f"Results saved to {output_file}")
+        result = {"model_name": variant}
+        for dataset_name in datasets_to_eval:
+            print(f"Evaluating {variant} on {dataset_name}...")
+            dataset_cls = get_dataset_class(dataset_name)
+            dataset = dataset_cls(
+                preprocess, args.dataset_location, args.batch_size, args.workers
+            )
+            accuracy = test_model_on_dataset(weighted_model, dataset)
+            result[dataset_name] = accuracy
+            print(f"{dataset_name} accuracy: {accuracy * 100:.2f}%")
+
+        if existing_result:
+            results[results.index(existing_result)] = result
+        else:
+            results.append(result)
+
+        with open(output_file, "w") as f:
+            for r in results:
+                f.write(json.dumps(r) + "\n")
+        print(f"Results saved to {output_file}")
 
     create_comparison_plot(output_file)
 
 
-def create_comparison_plot(specops_results_file):
+def create_comparison_plot(output_file):
     """
     Create a scatter plot comparing all models using results from jsonl files,
     matching the style from main.py.
 
     Args:
-        specops_results_file: Path to the specops results jsonl file
+        specops_results_file: Path to the quickeval results jsonl file
     """
     plt.figure(figsize=(12, 12))
     ax = plt.gca()
@@ -192,7 +207,6 @@ def create_comparison_plot(specops_results_file):
     print(f"Plotted {len(other_models)} additional individual checkpoints")
 
     result_files = {
-        "specops": specops_results_file,
         "greedy_soup": Path("results/greedy_soup.jsonl"),
         "uniform_soup": Path("results/uniform_soup.jsonl"),
     }
@@ -201,6 +215,10 @@ def create_comparison_plot(specops_results_file):
         assert path.exists(), f"Results file {path} does not exist"
 
     results_data = {}
+
+    with open(output_file, "r") as f:
+        results = [json.loads(line) for line in f]
+        print(f"Loaded {len(results)} results")
 
     for model_type, file_path in result_files.items():
         with open(file_path, "r") as f:
@@ -211,20 +229,26 @@ def create_comparison_plot(specops_results_file):
         ood_accs = [data[dataset] for dataset in OOD_DATASETS]
         data["OOD"] = sum(ood_accs) / len(ood_accs)
 
-    specops_data = results_data["specops"]
-    weighting = specops_data["model_name"].split("_")[1]
-    ax.scatter(
-        specops_data["ImageNet"],
-        specops_data["OOD"],
-        marker="o",
-        color="red",
-        s=100,
-        label=f"Weighted average",
-        zorder=100,
-    )
-    print(
-        f"Plotted SpecOps ({weighting}): ImageNet={specops_data['ImageNet']:.4f}, OOD={specops_data['OOD']:.4f}"
-    )
+    colors = plt.cm.Set2.colors[: len(results)]
+    for i, entry in enumerate(results):
+        ood_accs = [entry[dataset] for dataset in OOD_DATASETS]
+        entry["OOD"] = sum(ood_accs) / len(ood_accs)
+
+        variant = entry["model_name"]
+        color = colors[i]
+
+        ax.scatter(
+            entry["ImageNet"],
+            entry["OOD"],
+            marker="o",
+            color=color,
+            s=100,
+            label=f"Learned merge ({variant})",
+            zorder=100,
+        )
+        print(
+            f"Plotted {model_type}: ImageNet={entry['ImageNet']:.4f}, OOD={entry['OOD']:.4f}"
+        )
 
     uniform_data = results_data["uniform_soup"]
     ax.scatter(
@@ -312,24 +336,30 @@ def parse_arguments():
         help="Number of worker threads for data loading",
     )
     parser.add_argument(
-        "--alphas-path",
+        "--alphas-paths",
+        nargs="+",
         type=Path,
         required=True,
-        help="Path to the saved alpha weights file (.pt)",
+        help="List of paths to the saved alpha weights files (.pt)",
     )
     parser.add_argument(
-        "--weighting",
-        type=str,
+        "--variants",
+        nargs="+",
         choices=["spectrum", "model", "layer"],
         required=True,
-        help="Weighting scheme used for model merging",
+        help="List of weighting schemes used for model merging. Must match number of alphas-paths.",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing results files",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if len(args.alphas_paths) != len(args.variants):
+        raise ValueError("Number of alphas-paths must match number of variants")
+
+    return args
 
 
 if __name__ == "__main__":
