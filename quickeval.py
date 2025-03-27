@@ -205,7 +205,6 @@ def create_comparison_plot(output_file):
         label="Various checkpoints",
         zorder=9,
     )
-    print(f"Plotted {len(other_models)} additional individual checkpoints")
 
     result_files = {
         "greedy_soup": Path("results/greedy_soup.jsonl"),
@@ -219,12 +218,10 @@ def create_comparison_plot(output_file):
 
     with open(output_file, "r") as f:
         results = [json.loads(line) for line in f]
-        print(f"Loaded {len(results)} results")
 
     for model_type, file_path in result_files.items():
         with open(file_path, "r") as f:
             results_data[model_type] = json.loads(f.readline())
-            print(f"Loaded {model_type} results from {file_path}")
 
         data = results_data[model_type]
         ood_accs = [data[dataset] for dataset in OOD_DATASETS]
@@ -248,7 +245,7 @@ def create_comparison_plot(output_file):
             zorder=100,
         )
         print(
-            f"Plotted {model_type}: ImageNet={entry['ImageNet']:.4f}, OOD={entry['OOD']:.4f}"
+            f"Plotted {variant.capitalize()}: ImageNet={entry['ImageNet']:.4f}, OOD={entry['OOD']:.4f}"
         )
 
     uniform_data = results_data["uniform_soup"]
