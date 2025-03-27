@@ -14,7 +14,7 @@ import wandb
 
 
 class WeightedMergeLayer(torch.nn.Module):
-    def __init__(self, model, checkpoints, normalize=True):
+    def __init__(self, model, checkpoints, normalization="softmax"):
         """
         An interpolation merge with learnable weights (one weight per layer per model).
         """
@@ -30,19 +30,22 @@ class WeightedMergeLayer(torch.nn.Module):
             self.task_vectors.append(task_vector)
         self.checkpoints = self.task_vectors
 
-        self.normalize = normalize
+        self.normalization = normalization
         num_params = len(self.checkpoints[0])
         num_models = len(self.checkpoints)
-        alpha = torch.nn.functional.softmax(torch.ones(num_params, num_models), dim=1)
-        self._alpha = torch.nn.Parameter(alpha)
+        self._alpha = torch.nn.Parameter(torch.ones(num_params, num_models))
         self.beta = torch.nn.Parameter(torch.tensor(1.0))
 
     @property
     def alpha(self):
-        if self.normalize:
-            return torch.nn.functional.softmax(self._alpha, dim=1)
-        else:
+        if self.normalization == "none":
             return self._alpha
+        elif self.normalization == "softmax":
+            return torch.nn.functional.softmax(self._alpha, dim=1)
+        elif self.normalization == "tanh":
+            return torch.tanh(self._alpha)
+        else:
+            raise ValueError(f"Unsupported normalization method: {self.normalization}")
 
     def forward(self, x):
         combined_params = {}
@@ -61,7 +64,7 @@ class WeightedMergeLayer(torch.nn.Module):
 
 
 class WeightedMergeModel(torch.nn.Module):
-    def __init__(self, model, checkpoints, normalize=True):
+    def __init__(self, model, checkpoints, normalization="softmax"):
         """
         An interpolation merge with learnable weights (one weight per model).
         """
@@ -77,17 +80,20 @@ class WeightedMergeModel(torch.nn.Module):
             self.task_vectors.append(task_vector)
         self.checkpoints = self.task_vectors
 
-        self.normalize = normalize
+        self.normalization = normalization
         num_models = len(self.checkpoints)
-        alpha = torch.nn.functional.softmax(torch.ones(num_models), dim=0)
-        self._alpha = torch.nn.Parameter(alpha)
+        self._alpha = torch.nn.Parameter(torch.ones(num_models))
 
     @property
     def alpha(self):
-        if self.normalize:
-            return torch.nn.functional.softmax(self._alpha, dim=0)
-        else:
+        if self.normalization == "none":
             return self._alpha
+        elif self.normalization == "softmax":
+            return torch.nn.functional.softmax(self._alpha, dim=0)
+        elif self.normalization == "tanh":
+            return torch.tanh(self._alpha)
+        else:
+            raise ValueError(f"Unsupported normalization method: {self.normalization}")
 
     def forward(self, x):
         combined_params = {}
@@ -113,7 +119,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
         self,
         model,
         checkpoints,
-        normalize=True,
+        normalization="softmax",
         num_singular_values=100,
         zero_others=False,
     ):
@@ -124,7 +130,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
         Args:
             model: The base model
             checkpoints: List of model checkpoints
-            normalize: Whether to normalize alpha values using softmax
+            normalization: Normalization method to apply to alpha values ("softmax", "tanh", or "none")
             num_singular_values: Number of top singular values to modify
             zero_others: Whether to set non-top-k singular values to zero
         """
@@ -140,7 +146,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
             self.task_vectors.append(task_vector)
         self.checkpoints = self.task_vectors
 
-        self.normalize = normalize
+        self.normalization = normalization
         self.num_singular_values = num_singular_values
         self.zero_others = zero_others
         num_params = len(self.checkpoints[0])
@@ -169,10 +175,14 @@ class WeightedMergeSpectrum(torch.nn.Module):
 
     @property
     def alpha(self):
-        if not self.normalize:
+        if self.normalization == "none":
             return self._alpha
-        else:
+        elif self.normalization == "softmax":
             return torch.nn.functional.softmax(self._alpha, dim=1)
+        elif self.normalization == "tanh":
+            return torch.tanh(self._alpha)
+        else:
+            raise ValueError(f"Unsupported normalization method: {self.normalization}")
 
     def forward(self, x):
         combined_params = {}
@@ -214,6 +224,7 @@ def main(args):
             "weight_decay": args.weight_decay,
             "epochs": args.epochs,
             "alphas_dir": str(alphas_save_dir),
+            "normalization": args.normalization,
         },
     )
 
@@ -255,24 +266,23 @@ def main(args):
     for param in model.parameters():
         param.requires_grad_(False)
 
-    normalize = not args.unnormalized
     if args.weighting == "model":
         alpha_model = WeightedMergeModel(
             model=model,
             checkpoints=checkpoints,
-            normalize=normalize,
+            normalization=args.normalization,
         )
     elif args.weighting == "layer":
         alpha_model = WeightedMergeLayer(
             model=model,
             checkpoints=checkpoints,
-            normalize=normalize,
+            normalization=args.normalization,
         )
     elif args.weighting == "spectrum":
         alpha_model = WeightedMergeSpectrum(
             model=model,
             checkpoints=checkpoints,
-            normalize=normalize,
+            normalization=args.normalization,
             num_singular_values=args.num_singular_values,
             zero_others=args.zero_others,
         )
@@ -482,16 +492,19 @@ def parse_arguments():
         help="Weights & Biases project name",
     )
     parser.add_argument(
-        "--unnormalized",
-        action="store_true",
-        help="Use unnormalized weights instead of softmax-normalized weights",
+        "--normalization",
+        type=str,
+        default="softmax",
+        help="Normalization method to apply to alpha values (softmax, tanh, or none)",
     )
     parser.add_argument(
         "--zero-others",
         action="store_true",
         help="Zero out non-top-k singular values in spectrum weighting",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.normalization = args.normalization.lower()
+    return args
 
 
 if __name__ == "__main__":
