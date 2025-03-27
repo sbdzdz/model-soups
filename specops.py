@@ -109,7 +109,14 @@ class WeightedMergeModel(torch.nn.Module):
 
 
 class WeightedMergeSpectrum(torch.nn.Module):
-    def __init__(self, model, checkpoints, normalize=True, num_singular_values=100):
+    def __init__(
+        self,
+        model,
+        checkpoints,
+        normalize=True,
+        num_singular_values=100,
+        zero_others=False,
+    ):
         """
         A merge that modifies the spectrum of parameter matrices by scaling
         the top singular values with learnable parameters.
@@ -119,6 +126,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
             checkpoints: List of model checkpoints
             normalize: Whether to normalize alpha values using softmax
             num_singular_values: Number of top singular values to modify
+            zero_others: Whether to set non-top-k singular values to zero
         """
         super().__init__()
         self.model = model
@@ -134,6 +142,7 @@ class WeightedMergeSpectrum(torch.nn.Module):
 
         self.normalize = normalize
         self.num_singular_values = num_singular_values
+        self.zero_others = zero_others
         num_params = len(self.checkpoints[0])
 
         self._alpha = torch.nn.Parameter(torch.ones(num_params, num_singular_values))
@@ -178,6 +187,8 @@ class WeightedMergeSpectrum(torch.nn.Module):
                 S_modified = S.clone()
                 top_k = min(self.num_singular_values, len(S))
                 S_modified[:top_k] = S[:top_k] * self.alpha[idx, :top_k].cpu()
+                if self.zero_others:
+                    S_modified[top_k:] = 0
                 S_diag = torch.diag(S_modified)
 
                 param = torch.linalg.multi_dot([U, S_diag, Vh])
@@ -263,6 +274,7 @@ def main(args):
             checkpoints=checkpoints,
             normalize=normalize,
             num_singular_values=args.num_singular_values,
+            zero_others=args.zero_others,
         )
     else:
         raise ValueError(f"Unsupported weighting scheme: {args.weighting}")
@@ -473,6 +485,11 @@ def parse_arguments():
         "--unnormalized",
         action="store_true",
         help="Use unnormalized weights instead of softmax-normalized weights",
+    )
+    parser.add_argument(
+        "--zero-others",
+        action="store_true",
+        help="Zero out non-top-k singular values in spectrum weighting",
     )
     return parser.parse_args()
 
